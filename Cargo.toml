@@ -6,3 +6,5 @@ description = "Simple thread pool for mixed tokio / threaded infrastructure."
 edition = "2018"
 
 [dependencies]
+log = "^0.4"
+num_cpus = "^1.13"
