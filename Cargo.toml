@@ -1,0 +1,8 @@
+[package]
+name = "edeltraud"
+version = "0.1.0"
+authors = ["Alexey Voznyuk <me@swizard.info>"]
+description = "Simple thread pool for mixed tokio / threaded infrastructure."
+edition = "2018"
+
+[dependencies]
