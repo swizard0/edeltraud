@@ -18,6 +18,10 @@ pub trait Job: Send + 'static {
     fn run(self) -> Self::Output;
 }
 
+pub trait Subjob<J>: Job where J: Job, Self::Output: From<J::Output>, J::Output: From<Self::Output> {
+    fn into_job(self) -> J;
+}
+
 pub struct Edeltraud<T> where T: Job {
     dispatcher_tx: channel::Sender<common::Event<T>>,
 }
@@ -77,12 +81,16 @@ pub enum SpawnError {
 }
 
 impl<T> Edeltraud<T> where T: Job {
-    pub async fn spawn<J>(&self, job: J) -> Result<T::Output, SpawnError> where J: Job, T: From<J>, T::Output: From<J::Output> {
+    pub async fn spawn<J>(&self, job: J) -> Result<T::Output, SpawnError>
+    where J: Subjob<T>,
+          T::Output: From<J::Output>,
+          J::Output: From<T::Output>,
+    {
         use futures::channel::oneshot;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         let task = common::Task {
-            task: job.into(),
+            task: job.into_job(),
             reply_tx,
         };
         self.dispatcher_tx.send(common::Event::IncomingTask(task))
@@ -98,5 +106,11 @@ impl<T> Clone for Edeltraud<T> where T: Job {
         Self {
             dispatcher_tx: self.dispatcher_tx.clone(),
         }
+    }
+}
+
+impl<T> Subjob<T> for T where T: Job {
+    fn into_job(self) -> T {
+        self
     }
 }
