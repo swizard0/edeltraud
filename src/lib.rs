@@ -1,7 +1,6 @@
 use std::{
     io,
     thread,
-    convert::TryFrom,
 };
 
 use crossbeam_channel as channel;
@@ -76,15 +75,12 @@ pub enum BuildError {
 }
 
 #[derive(Debug)]
-pub enum SpawnError<E> {
-    ConvertOutput(E),
+pub enum SpawnError {
     ThreadPoolGone,
 }
 
 impl<T, R> Edeltraud<T, R> {
-    pub async fn spawn<J, O, E>(&self, job: J) -> Result<O, SpawnError<E>>
-    where T: From<J>,
-          O: TryFrom<R, Error = E>,
+    pub async fn spawn<J>(&self, job: J) -> Result<R, SpawnError> where J: Job, T: From<J>, R: From<J::Output>,
     {
         use futures::channel::oneshot;
 
@@ -97,9 +93,7 @@ impl<T, R> Edeltraud<T, R> {
             .map_err(|_send_error| SpawnError::ThreadPoolGone)?;
         let output = reply_rx.await
             .map_err(|oneshot::Canceled| SpawnError::ThreadPoolGone)?;
-        let result = O::try_from(output)
-            .map_err(SpawnError::ConvertOutput)?;
-        Ok(result)
+        Ok(output.into())
     }
 }
 

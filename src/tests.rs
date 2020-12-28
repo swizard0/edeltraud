@@ -42,5 +42,7 @@ fn basic() {
         }
         let _: Vec<()> = futures::future::try_join_all(tasks).await.unwrap();
     });
-    assert!(now.elapsed().as_secs_f64() < 0.5);
+    let elapsed = now.elapsed().as_secs_f64();
+    assert!(elapsed >= 0.4);
+    assert!(elapsed < 0.5);
 }
