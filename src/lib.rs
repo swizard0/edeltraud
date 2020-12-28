@@ -12,14 +12,14 @@ mod dispatcher;
 #[cfg(test)]
 mod tests;
 
-pub struct Edeltraud<T, R> {
-    dispatcher_tx: channel::Sender<common::Event<T, R>>,
-}
-
 pub trait Job: Send + 'static {
-    type Output;
+    type Output: Send + 'static;
 
     fn run(self) -> Self::Output;
+}
+
+pub struct Edeltraud<T> where T: Job {
+    dispatcher_tx: channel::Sender<common::Event<T>>,
 }
 
 pub struct Builder {
@@ -39,10 +39,7 @@ impl Builder {
         self
     }
 
-    pub fn build<T, R>(&mut self) -> Result<Edeltraud<T, R>, BuildError>
-    where T: Job<Output = R> + Send + 'static,
-          R: Send + 'static,
-    {
+    pub fn build<T>(&mut self) -> Result<Edeltraud<T>, BuildError> where T: Job {
         let worker_threads = self.worker_threads
             .unwrap_or_else(|| num_cpus::get());
 
@@ -79,9 +76,8 @@ pub enum SpawnError {
     ThreadPoolGone,
 }
 
-impl<T, R> Edeltraud<T, R> {
-    pub async fn spawn<J>(&self, job: J) -> Result<R, SpawnError> where J: Job, T: From<J>, R: From<J::Output>,
-    {
+impl<T> Edeltraud<T> where T: Job {
+    pub async fn spawn<J>(&self, job: J) -> Result<T::Output, SpawnError> where J: Job, T: From<J>, T::Output: From<J::Output> {
         use futures::channel::oneshot;
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -97,7 +93,7 @@ impl<T, R> Edeltraud<T, R> {
     }
 }
 
-impl<T, R> Clone for Edeltraud<T, R> {
+impl<T> Clone for Edeltraud<T> where T: Job {
     fn clone(&self) -> Self {
         Self {
             dispatcher_tx: self.dispatcher_tx.clone(),

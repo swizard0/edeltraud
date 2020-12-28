@@ -24,7 +24,7 @@ fn basic() {
         }
     }
 
-    let pool: Edeltraud<SleepJob, ()> = Builder::new()
+    let pool: Edeltraud<SleepJob> = Builder::new()
         .worker_threads(4)
         .build()
         .unwrap();

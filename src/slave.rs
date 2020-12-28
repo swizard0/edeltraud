@@ -8,12 +8,12 @@ use super::{
     Job,
 };
 
-pub fn run<T, R>(
-    dispatcher_tx: channel::Sender<Event<T, R>>,
-    slave_rx: channel::Receiver<Task<T, R>>,
+pub fn run<T>(
+    dispatcher_tx: channel::Sender<Event<T>>,
+    slave_rx: channel::Receiver<Task<T>>,
     slave_index: usize,
 )
-    where T: Job<Output = R>,
+    where T: Job,
 {
     loop {
         if let Err(_send_error) = dispatcher_tx.send(Event::SlaveOnline { slave_index, }) {

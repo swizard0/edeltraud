@@ -1,11 +1,14 @@
 use crossbeam_channel as channel;
 
-use super::common::{
-    Task,
-    Event,
+use super::{
+    Job,
+    common::{
+        Task,
+        Event,
+    },
 };
 
-pub fn run<T, R>(dispatcher_rx: channel::Receiver<Event<T, R>>, slaves: Vec<channel::Sender<Task<T, R>>>) {
+pub fn run<T>(dispatcher_rx: channel::Receiver<Event<T>>, slaves: Vec<channel::Sender<Task<T>>>) where T: Job {
     let mut online = Vec::with_capacity(slaves.len());
     let mut tasks = Vec::new();
 
