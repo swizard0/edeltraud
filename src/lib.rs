@@ -1,17 +1,26 @@
 use std::{
     io,
     thread,
-    sync::{
-        mpsc,
-    },
+    convert::TryFrom,
 };
 
+use crossbeam_channel as channel;
+
+mod common;
 mod slave;
 mod dispatcher;
 
-#[derive(Clone)]
-pub struct Edeltraud<T> {
-    dispatcher_tx: mpsc::Sender<dispatcher::Event<T>>,
+#[cfg(test)]
+mod tests;
+
+pub struct Edeltraud<T, R> {
+    dispatcher_tx: channel::Sender<common::Event<T, R>>,
+}
+
+pub trait Job {
+    type Output;
+
+    fn run(self) -> Self::Output;
 }
 
 pub struct Builder {
@@ -31,47 +40,73 @@ impl Builder {
         self
     }
 
-    pub fn build<T>(&mut self) -> Result<Edeltraud<T>, Error> where T: Send + 'static {
+    pub fn build<T, R>(&mut self) -> Result<Edeltraud<T, R>, BuildError>
+    where T: Job<Output = R> + Send + 'static,
+          R: Send + 'static,
+    {
         let worker_threads = self.worker_threads
             .unwrap_or_else(|| num_cpus::get());
 
-        let (dispatcher_tx, dispatcher_rx) = mpsc::channel();
+        let (dispatcher_tx, dispatcher_rx) = channel::unbounded();
         let mut slaves = Vec::with_capacity(worker_threads);
 
         for slave_index in 0 .. worker_threads {
-            let (slave_tx, slave_rx) = mpsc::channel();
+            let (slave_tx, slave_rx) = channel::bounded(0);
             slaves.push(slave_tx);
             let dispatcher_tx = dispatcher_tx.clone();
             thread::Builder::new()
                 .name(format!("edeltraud worker {}", slave_index))
                 .spawn(move || slave::run(dispatcher_tx, slave_rx, slave_index))
-                .map_err(Error::WorkerSpawn)?;
+                .map_err(BuildError::WorkerSpawn)?;
         }
 
         thread::Builder::new()
             .name("edeltraud dispatcher".to_string())
             .spawn(move || dispatcher::run(dispatcher_rx, slaves))
-            .map_err(Error::DispatcherSpawn)?;
+            .map_err(BuildError::DispatcherSpawn)?;
 
         Ok(Edeltraud { dispatcher_tx, })
     }
 }
 
 #[derive(Debug)]
-pub enum Error {
+pub enum BuildError {
     DispatcherSpawn(io::Error),
     WorkerSpawn(io::Error),
 }
 
-impl<T> Edeltraud<T> {
-
+#[derive(Debug)]
+pub enum SpawnError<E> {
+    ConvertOutput(E),
+    ThreadPoolGone,
 }
 
+impl<T, R> Edeltraud<T, R> {
+    pub async fn spawn<J, O, E>(&self, job: J) -> Result<O, SpawnError<E>>
+    where T: From<J>,
+          O: TryFrom<R, Error = E>,
+    {
+        use futures::channel::oneshot;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let task = common::Task {
+            task: job.into(),
+            reply_tx,
+        };
+        self.dispatcher_tx.send(common::Event::IncomingTask(task))
+            .map_err(|_send_error| SpawnError::ThreadPoolGone)?;
+        let output = reply_rx.await
+            .map_err(|oneshot::Canceled| SpawnError::ThreadPoolGone)?;
+        let result = O::try_from(output)
+            .map_err(SpawnError::ConvertOutput)?;
+        Ok(result)
+    }
+}
+
+impl<T, R> Clone for Edeltraud<T, R> {
+    fn clone(&self) -> Self {
+        Self {
+            dispatcher_tx: self.dispatcher_tx.clone(),
+        }
     }
 }

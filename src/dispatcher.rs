@@ -1,15 +1,11 @@
-use std::{
-    sync::{
-        mpsc,
-    },
+use crossbeam_channel as channel;
+
+use super::common::{
+    Task,
+    Event,
 };
 
-pub enum Event<T> {
-    IncomingTask(T),
-    SlaveOnline { slave_index: usize, },
-}
-
-pub fn run<T>(dispatcher_rx: mpsc::Receiver<Event<T>>, slaves: Vec<mpsc::Sender<T>>) {
+pub fn run<T, R>(dispatcher_rx: channel::Receiver<Event<T, R>>, slaves: Vec<channel::Sender<Task<T, R>>>) {
     let mut online = Vec::with_capacity(slaves.len());
     let mut tasks = Vec::new();
 
@@ -18,7 +14,7 @@ pub fn run<T>(dispatcher_rx: mpsc::Receiver<Event<T>>, slaves: Vec<mpsc::Sender<
             Ok(Event::IncomingTask(task)) =>
                 match online.pop() {
                     Some(slave_index) => {
-                        let slave: &'_ mpsc::Sender<_> = &slaves[slave_index];
+                        let slave: &'_ channel::Sender<_> = &slaves[slave_index];
                         if let Err(_send_error) = slave.send(task) {
                             log::error!("slave {} terminated unexpectedly: terminating", slave_index);
                             break;
@@ -37,7 +33,7 @@ pub fn run<T>(dispatcher_rx: mpsc::Receiver<Event<T>>, slaves: Vec<mpsc::Sender<
                     None =>
                         online.push(slave_index),
                 },
-            Err(mpsc::RecvError) => {
+            Err(channel::RecvError) => {
                 log::debug!("all dispatcher clients are dropped: terminating");
                 break;
             },
