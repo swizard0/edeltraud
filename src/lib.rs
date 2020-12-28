@@ -16,7 +16,7 @@ pub struct Edeltraud<T, R> {
     dispatcher_tx: channel::Sender<common::Event<T, R>>,
 }
 
-pub trait Job {
+pub trait Job: Send + 'static {
     type Output;
 
     fn run(self) -> Self::Output;
