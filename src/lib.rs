@@ -3,9 +3,18 @@
 use std::{
     io,
     thread,
+    pin::Pin,
+    task::Poll,
 };
 
 use crossbeam_channel as channel;
+
+use futures::{
+    channel::{
+        oneshot,
+    },
+    Future,
+};
 
 mod common;
 mod slave;
@@ -79,9 +88,7 @@ pub enum SpawnError {
 }
 
 impl<T> Edeltraud<T> where T: Job {
-    pub async fn spawn<J>(&self, job: J) -> Result<T::Output, SpawnError> where J: Job, T: From<J>, T::Output: From<J::Output> {
-        use futures::channel::oneshot;
-
+    pub fn spawn_handle<J>(&self, job: J) -> Result<Handle<T::Output>, SpawnError> where J: Job, T: From<J> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let task = common::Task {
             task: job.into(),
@@ -89,9 +96,13 @@ impl<T> Edeltraud<T> where T: Job {
         };
         self.dispatcher_tx.send(common::Event::IncomingTask(task))
             .map_err(|_send_error| SpawnError::ThreadPoolGone)?;
-        let output = reply_rx.await
-            .map_err(|oneshot::Canceled| SpawnError::ThreadPoolGone)?;
-        Ok(output.into())
+
+        Ok(Handle { reply_rx, })
+    }
+
+    pub async fn spawn<J>(&self, job: J) -> Result<T::Output, SpawnError> where J: Job, T: From<J> {
+        let handle = self.spawn_handle(job)?;
+        handle.await
     }
 }
 
@@ -100,5 +111,20 @@ impl<T> Clone for Edeltraud<T> where T: Job {
         Self {
             dispatcher_tx: self.dispatcher_tx.clone(),
         }
+    }
+}
+
+pub struct Handle<T> {
+    reply_rx: oneshot::Receiver<T>,
+}
+
+impl<T> Future for Handle<T> {
+    type Output = Result<T, SpawnError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let reply_rx = Pin::new(&mut this.reply_rx);
+        reply_rx.poll(cx)
+            .map_err(|oneshot::Canceled| SpawnError::ThreadPoolGone)
     }
 }
