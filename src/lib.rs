@@ -3,11 +3,16 @@
 use std::{
     io,
     thread,
-    pin::Pin,
-    task::Poll,
+    pin::{
+        Pin,
+    },
+    task::{
+        Poll,
+    },
+    sync::{
+        Arc,
+    },
 };
-
-use crossbeam_channel as channel;
 
 use futures::{
     channel::{
@@ -18,7 +23,7 @@ use futures::{
 
 mod common;
 mod slave;
-mod dispatcher;
+mod inner;
 
 #[cfg(test)]
 mod tests;
@@ -30,7 +35,7 @@ pub trait Job: Send + 'static {
 }
 
 pub struct Edeltraud<T> where T: Job {
-    dispatcher_tx: channel::Sender<common::Event<T>>,
+    inner: Arc<inner::Inner<T>>,
 }
 
 pub struct Builder {
@@ -53,50 +58,45 @@ impl Builder {
     pub fn build<T>(&mut self) -> Result<Edeltraud<T>, BuildError> where T: Job {
         let worker_threads = self.worker_threads
             .unwrap_or_else(|| num_cpus::get());
-
-        let (dispatcher_tx, dispatcher_rx) = channel::unbounded();
-        let mut slaves = Vec::with_capacity(worker_threads);
-
+        let inner = Arc::new(inner::Inner::new());
         for slave_index in 0 .. worker_threads {
-            let (slave_tx, slave_rx) = channel::bounded(0);
-            slaves.push(slave_tx);
-            let dispatcher_tx = dispatcher_tx.clone();
+            let inner = inner.clone();
             thread::Builder::new()
                 .name(format!("edeltraud worker {}", slave_index))
-                .spawn(move || slave::run(dispatcher_tx, slave_rx, slave_index))
+                .spawn(move || slave::run(&inner, slave_index))
                 .map_err(BuildError::WorkerSpawn)?;
         }
-
-        thread::Builder::new()
-            .name("edeltraud dispatcher".to_string())
-            .spawn(move || dispatcher::run(dispatcher_rx, slaves))
-            .map_err(BuildError::DispatcherSpawn)?;
-
-        Ok(Edeltraud { dispatcher_tx, })
+        Ok(Edeltraud { inner, })
     }
 }
 
 #[derive(Debug)]
 pub enum BuildError {
-    DispatcherSpawn(io::Error),
     WorkerSpawn(io::Error),
 }
 
 #[derive(Debug)]
 pub enum SpawnError {
+    MutexLock,
     ThreadPoolGone,
 }
 
 impl<T> Edeltraud<T> where T: Job {
+    pub fn spawn_noreply<J>(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()>, T: From<J> {
+        let task = common::Task {
+            task: job.into(),
+            task_reply: common::TaskReply::None,
+        };
+        self.inner.spawn(task)
+    }
+
     pub fn spawn_handle<J>(&self, job: J) -> Result<Handle<T::Output>, SpawnError> where J: Job, T: From<J> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let task = common::Task {
             task: job.into(),
-            reply_tx,
+            task_reply: common::TaskReply::Oneshot { reply_tx, },
         };
-        self.dispatcher_tx.send(common::Event::IncomingTask(task))
-            .map_err(|_send_error| SpawnError::ThreadPoolGone)?;
-
+        self.inner.spawn(task)?;
         Ok(Handle { reply_rx, })
     }
 
@@ -109,7 +109,7 @@ impl<T> Edeltraud<T> where T: Job {
 impl<T> Clone for Edeltraud<T> where T: Job {
     fn clone(&self) -> Self {
         Self {
-            dispatcher_tx: self.dispatcher_tx.clone(),
+            inner: self.inner.clone(),
         }
     }
 }
