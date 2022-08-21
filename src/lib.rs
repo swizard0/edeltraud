@@ -28,13 +28,10 @@ mod inner;
 #[cfg(test)]
 mod tests;
 
-pub trait Job: Sized + Send + 'static {
-    type Output: Sized + Send + 'static;
+pub trait Job: Send + 'static {
+    type Output: Send + 'static;
 
-    fn run<J>(self, thread_pool: &Edeltraud<J>) -> Self::Output
-    where J: Job + From<Self>,
-          J::Output: From<Self::Output>,
-          Self::Output: From<J::Output>;
+    fn run<J>(self, thread_pool: &Edeltraud<J>) -> Self::Output where J: Job;
 }
 
 pub struct Edeltraud<T> where T: Job {

@@ -19,11 +19,7 @@ fn basic() {
     impl Job for SleepJob {
         type Output = ();
 
-        fn run<J>(self, _thread_pool: &Edeltraud<J>) -> Self::Output
-        where J: Job + From<Self>,
-              J::Output: From<Self::Output>,
-              Self::Output: From<J::Output>
-        {
+        fn run<J>(self, _thread_pool: &Edeltraud<J>) -> Self::Output where J: Job {
             thread::sleep(Duration::from_millis(100));
         }
     }
