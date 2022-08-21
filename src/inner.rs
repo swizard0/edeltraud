@@ -26,7 +26,7 @@ impl<T> Inner<T> where T: Job {
         }
     }
 
-    pub fn spawn<J>(&self, task: Task<T>) -> Result<(), SpawnError> where J: Job, T: From<J> {
+    pub fn spawn(&self, task: Task<T>) -> Result<(), SpawnError> {
         let mut tasks_queue = self.tasks_queue.lock()
             .map_err(|_| SpawnError::MutexLock)?;
         tasks_queue.push(task);

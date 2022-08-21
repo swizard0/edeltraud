@@ -84,7 +84,7 @@ pub enum SpawnError {
 }
 
 impl<T> Edeltraud<T> where T: Job {
-    pub fn spawn_noreply<J>(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()>, T: From<J> {
+    pub fn spawn_noreply<J>(&self, job: J) -> Result<(), SpawnError> where T: From<J> {
         let task = common::Task {
             task: job.into(),
             task_reply: common::TaskReply::None,
@@ -92,7 +92,7 @@ impl<T> Edeltraud<T> where T: Job {
         self.inner.spawn(task)
     }
 
-    pub fn spawn_handle<J>(&self, job: J) -> Result<Handle<T::Output>, SpawnError> where J: Job, T: From<J> {
+    pub fn spawn_handle<J>(&self, job: J) -> Result<Handle<T::Output>, SpawnError> where T: From<J> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let task = common::Task {
             task: job.into(),
@@ -102,7 +102,7 @@ impl<T> Edeltraud<T> where T: Job {
         Ok(Handle { reply_rx, })
     }
 
-    pub async fn spawn<J>(&self, job: J) -> Result<T::Output, SpawnError> where J: Job, T: From<J> {
+    pub async fn spawn<J>(&self, job: J) -> Result<T::Output, SpawnError> where T: From<J> {
         let handle = self.spawn_handle(job)?;
         handle.await
     }
