@@ -28,10 +28,13 @@ mod inner;
 #[cfg(test)]
 mod tests;
 
-pub trait Job: Send + 'static {
-    type Output: Send + 'static;
+pub trait Job: Sized + Send + 'static {
+    type Output: Sized + Send + 'static;
 
-    fn run(self) -> Self::Output;
+    fn run<J>(self, thread_pool: &Edeltraud<J>) -> Self::Output
+    where J: Job + From<Self>,
+          J::Output: From<Self::Output>,
+          Self::Output: From<J::Output>;
 }
 
 pub struct Edeltraud<T> where T: Job {
@@ -58,15 +61,17 @@ impl Builder {
     pub fn build<T>(&mut self) -> Result<Edeltraud<T>, BuildError> where T: Job {
         let worker_threads = self.worker_threads
             .unwrap_or_else(|| num_cpus::get());
-        let inner = Arc::new(inner::Inner::new());
+        let thread_pool = Edeltraud {
+            inner: Arc::new(inner::Inner::new()),
+        };
         for slave_index in 0 .. worker_threads {
-            let inner = inner.clone();
+            let thread_pool = thread_pool.clone();
             thread::Builder::new()
                 .name(format!("edeltraud worker {}", slave_index))
-                .spawn(move || slave::run(&inner, slave_index))
+                .spawn(move || slave::run(&thread_pool, slave_index))
                 .map_err(BuildError::WorkerSpawn)?;
         }
-        Ok(Edeltraud { inner, })
+        Ok(thread_pool)
     }
 }
 

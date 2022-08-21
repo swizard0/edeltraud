@@ -3,16 +3,16 @@ use crate::{
         Task,
         TaskReply,
     },
-    inner::{
-        Inner,
-    },
     Job,
+    Edeltraud,
 };
 
-pub fn run<T>(inner: &Inner<T>, slave_index: usize) where T: Job {
+pub fn run<T>(thread_pool: &Edeltraud<T>, slave_index: usize) where T: Job {
     loop {
-        let Task { task, task_reply, } = inner.acquire_task();
-        let output = task.run();
+        let Task { task, task_reply, } = thread_pool
+            .inner
+            .acquire_task();
+        let output = task.run(thread_pool);
         match task_reply {
             TaskReply::None =>
                 (),
