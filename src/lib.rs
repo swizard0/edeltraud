@@ -31,7 +31,7 @@ mod tests;
 pub trait Job: Sized + Send + 'static {
     type Output: Send + 'static;
 
-    fn run<J>(self, thread_pool: &Edeltraud<J>) -> Self::Output where J: Job + From<Self>;
+    fn run<J, G>(self, thread_pool: &Edeltraud<J>) -> Self::Output where J: Job + From<G>, G: From<Self>;
 }
 
 pub struct Edeltraud<T> where T: Job {
