@@ -21,8 +21,6 @@ use futures::{
     Future,
 };
 
-mod common;
-mod slave;
 mod inner;
 
 #[cfg(test)]
@@ -31,11 +29,11 @@ mod tests;
 pub trait Job: Sized + Send + 'static {
     type Output: Send + 'static;
 
-    fn run<J, G>(self, thread_pool: &Edeltraud<J>) -> Self::Output where J: Job + From<G> + From<Self>, G: From<Self>;
+    fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self>;
 }
 
-pub struct Edeltraud<T> where T: Job {
-    inner: Arc<inner::Inner<T>>,
+pub struct Edeltraud<J> where J: Job {
+    inner: Arc<inner::Inner<J>>,
 }
 
 pub struct Builder {
@@ -55,17 +53,22 @@ impl Builder {
         self
     }
 
-    pub fn build<T>(&mut self) -> Result<Edeltraud<T>, BuildError> where T: Job {
+    pub fn build<J>(&mut self) -> Result<Edeltraud<J>, BuildError> where J: Job {
         let worker_threads = self.worker_threads
             .unwrap_or_else(|| num_cpus::get());
-        let thread_pool = Edeltraud {
+        let thread_pool: Edeltraud<J> = Edeltraud {
             inner: Arc::new(inner::Inner::new()),
         };
         for slave_index in 0 .. worker_threads {
             let thread_pool = thread_pool.clone();
             thread::Builder::new()
                 .name(format!("edeltraud worker {}", slave_index))
-                .spawn(move || slave::run(&thread_pool, slave_index))
+                .spawn(move || {
+                    loop {
+                        let job = thread_pool.inner.acquire_job();
+                        job.run(&thread_pool);
+                    }
+                })
                 .map_err(BuildError::WorkerSpawn)?;
         }
         Ok(thread_pool)
@@ -83,32 +86,60 @@ pub enum SpawnError {
     ThreadPoolGone,
 }
 
-impl<T> Edeltraud<T> where T: Job {
-    pub fn spawn_noreply<J>(&self, job: J) -> Result<(), SpawnError> where T: From<J> {
-        let task = common::Task {
-            task: job.into(),
-            task_reply: common::TaskReply::None,
-        };
-        self.inner.spawn(task)
-    }
+pub trait ThreadPool<J> {
+    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()>;
+}
 
-    pub fn spawn_handle<J>(&self, job: J) -> Result<Handle<T::Output>, SpawnError> where T: From<J> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let task = common::Task {
-            task: job.into(),
-            task_reply: common::TaskReply::Oneshot { reply_tx, },
-        };
-        self.inner.spawn(task)?;
-        Ok(Handle { reply_rx, })
-    }
-
-    pub async fn spawn<J>(&self, job: J) -> Result<T::Output, SpawnError> where T: From<J> {
-        let handle = self.spawn_handle(job)?;
-        handle.await
+impl<J> ThreadPool<J> for Edeltraud<J> where J: Job {
+    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()> {
+        self.inner.spawn(job)
     }
 }
 
-impl<T> Clone for Edeltraud<T> where T: Job {
+pub enum AsyncJob<G> where G: Job {
+    Master {
+        job: G,
+        result_tx: oneshot::Sender<G::Output>,
+    },
+    Slave(G),
+}
+
+pub fn job_async<P, J, G>(thread_pool: &P, job: G) -> Result<AsyncResult<G::Output>, SpawnError>
+where P: ThreadPool<J>,
+      J: Job<Output = ()> + From<AsyncJob<G>>,
+      G: Job,
+{
+    let (result_tx, result_rx) = oneshot::channel();
+    let async_job = AsyncJob::Master { job, result_tx, };
+    thread_pool.spawn(async_job.into())?;
+
+    Ok(AsyncResult { result_rx, })
+}
+
+impl<G> Job for AsyncJob<G> where G: Job {
+    type Output = ();
+
+    fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
+        let thread_pool_job_map =
+            EdeltraudJobMap::new::<Self, G>(
+                thread_pool,
+                AsyncJob::Slave,
+            );
+        match self {
+            AsyncJob::Master { job, result_tx, } => {
+                let output = job.run(&thread_pool_job_map);
+                if let Err(_send_error) = result_tx.send(output) {
+                    log::warn!("async result channel dropped before job is finished");
+                }
+            },
+            AsyncJob::Slave(job) => {
+                job.run(&thread_pool_job_map);
+            },
+        }
+    }
+}
+
+impl<J> Clone for Edeltraud<J> where J: Job {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -116,17 +147,40 @@ impl<T> Clone for Edeltraud<T> where T: Job {
     }
 }
 
-pub struct Handle<T> {
-    reply_rx: oneshot::Receiver<T>,
+pub struct EdeltraudJobMap<'a, P, F> {
+    thread_pool: &'a P,
+    job_map: F,
 }
 
-impl<T> Future for Handle<T> {
+impl<'a, P, F> EdeltraudJobMap<'a, P, F> {
+    pub fn new<J, G>(thread_pool: &'a P, job_map: F) -> Self {
+        Self { thread_pool, job_map, }
+    }
+}
+
+impl<'a, P, F, J, G> ThreadPool<G> for EdeltraudJobMap<'a, P, F>
+where P: ThreadPool<J>,
+      J: Job<Output = ()>,
+      G: Job,
+      F: Fn(G) -> J
+{
+    fn spawn(&self, job: G) -> Result<(), SpawnError> where G: Job {
+        let mapped_job = (self.job_map)(job);
+        self.thread_pool.spawn(mapped_job)
+    }
+}
+
+pub struct AsyncResult<T> {
+    result_rx: oneshot::Receiver<T>,
+}
+
+impl<T> Future for AsyncResult<T> {
     type Output = Result<T, SpawnError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let reply_rx = Pin::new(&mut this.reply_rx);
-        reply_rx.poll(cx)
+        let result_rx = Pin::new(&mut this.result_rx);
+        result_rx.poll(cx)
             .map_err(|oneshot::Canceled| SpawnError::ThreadPoolGone)
     }
 }

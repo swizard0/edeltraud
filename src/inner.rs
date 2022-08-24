@@ -6,41 +6,37 @@ use std::{
 };
 
 use crate::{
-    common::{
-        Task,
-    },
-    Job,
     SpawnError,
 };
 
-pub struct Inner<T> where T: Job {
-    tasks_queue: Mutex<Vec<Task<T>>>,
+pub struct Inner<J> {
+    jobs_queue: Mutex<Vec<J>>,
     condvar: Condvar,
 }
 
-impl<T> Inner<T> where T: Job {
+impl<J> Inner<J> {
     pub fn new() -> Self {
         Self {
-            tasks_queue: Mutex::new(Vec::new()),
+            jobs_queue: Mutex::new(Vec::new()),
             condvar: Condvar::new(),
         }
     }
 
-    pub fn spawn(&self, task: Task<T>) -> Result<(), SpawnError> {
-        let mut tasks_queue = self.tasks_queue.lock()
+    pub fn spawn(&self, job: J) -> Result<(), SpawnError> {
+        let mut jobs_queue = self.jobs_queue.lock()
             .map_err(|_| SpawnError::MutexLock)?;
-        tasks_queue.push(task);
+        jobs_queue.push(job);
         self.condvar.notify_one();
         Ok(())
     }
 
-    pub fn acquire_task(&self) -> Task<T> {
-        let mut tasks_queue = self.tasks_queue.lock().unwrap();
+    pub fn acquire_job(&self) -> J {
+        let mut jobs_queue = self.jobs_queue.lock().unwrap();
         loop {
-            if let Some(task) = tasks_queue.pop() {
-                return task;
+            if let Some(job) = jobs_queue.pop() {
+                return job;
             }
-            tasks_queue = self.condvar.wait(tasks_queue).unwrap();
+            jobs_queue = self.condvar.wait(jobs_queue).unwrap();
         }
     }
 }
