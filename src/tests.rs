@@ -113,12 +113,7 @@ impl Job for WrappedSleepJob {
 
     fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
         let WrappedSleepJob(sleep_job) = self;
-        let thread_pool_job_map =
-            EdeltraudJobMap::new::<Self, AsyncJob<SleepJob>>(
-                thread_pool,
-                WrappedSleepJob,
-            );
-        sleep_job.run(&thread_pool_job_map)
+        sleep_job.run(&EdeltraudJobMap::new(thread_pool))
     }
 }
 

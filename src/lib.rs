@@ -12,6 +12,9 @@ use std::{
     sync::{
         Arc,
     },
+    marker::{
+        PhantomData,
+    },
 };
 
 use futures::{
@@ -104,6 +107,12 @@ pub enum AsyncJob<G> where G: Job {
     Slave(G),
 }
 
+impl<G> From<G> for AsyncJob<G> where G: Job {
+    fn from(job: G) -> AsyncJob<G> {
+        AsyncJob::Slave(job)
+    }
+}
+
 pub fn job_async<P, J, G>(thread_pool: &P, job: G) -> Result<AsyncResult<G::Output>, SpawnError>
 where P: ThreadPool<J>,
       J: Job<Output = ()> + From<AsyncJob<G>>,
@@ -120,11 +129,7 @@ impl<G> Job for AsyncJob<G> where G: Job {
     type Output = ();
 
     fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
-        let thread_pool_job_map =
-            EdeltraudJobMap::new::<Self, G>(
-                thread_pool,
-                AsyncJob::Slave,
-            );
+        let thread_pool_job_map = EdeltraudJobMap::new(thread_pool);
         match self {
             AsyncJob::Master { job, result_tx, } => {
                 let output = job.run(&thread_pool_job_map);
@@ -147,26 +152,24 @@ impl<J> Clone for Edeltraud<J> where J: Job {
     }
 }
 
-pub struct EdeltraudJobMap<'a, P, F> {
+pub struct EdeltraudJobMap<'a, P, J, G> {
     thread_pool: &'a P,
-    job_map: F,
+    _marker: PhantomData<(J, G)>,
 }
 
-impl<'a, P, F> EdeltraudJobMap<'a, P, F> {
-    pub fn new<J, G>(thread_pool: &'a P, job_map: F) -> Self {
-        Self { thread_pool, job_map, }
+impl<'a, P, J, G> EdeltraudJobMap<'a, P, J, G> {
+    pub fn new(thread_pool: &'a P) -> Self {
+        Self { thread_pool, _marker: PhantomData, }
     }
 }
 
-impl<'a, P, F, J, G> ThreadPool<G> for EdeltraudJobMap<'a, P, F>
+impl<'a, P, J, G> ThreadPool<G> for EdeltraudJobMap<'a, P, J, G>
 where P: ThreadPool<J>,
-      J: Job<Output = ()>,
+      J: Job<Output = ()> + From<G>,
       G: Job,
-      F: Fn(G) -> J
 {
     fn spawn(&self, job: G) -> Result<(), SpawnError> where G: Job {
-        let mapped_job = (self.job_map)(job);
-        self.thread_pool.spawn(mapped_job)
+        self.thread_pool.spawn(job.into())
     }
 }
 
