@@ -116,7 +116,6 @@ impl<G> From<G> for AsyncJob<G> where G: Job {
 pub fn job<P, J, G>(thread_pool: &P, job: G) -> Result<(), SpawnError>
 where P: ThreadPool<J>,
       J: Job<Output = ()> + From<G>,
-      G: Job,
 {
     thread_pool.spawn(job.into())
 }
