@@ -168,7 +168,7 @@ where P: ThreadPool<J>,
       J: Job<Output = ()> + From<G>,
       G: Job,
 {
-    fn spawn(&self, job: G) -> Result<(), SpawnError> where G: Job {
+    fn spawn(&self, job: G) -> Result<(), SpawnError> where G: Job<Output = ()> {
         self.thread_pool.spawn(job.into())
     }
 }
