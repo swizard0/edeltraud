@@ -1,6 +1,6 @@
 [package]
 name = "edeltraud"
-version = "0.8.5"
+version = "0.8.6"
 authors = ["Alexey Voznyuk <me@swizard.info>"]
 description = "Simple thread pool for mixed tokio / threaded infrastructure with zero allocations and static dispatching only."
 edition = "2021"

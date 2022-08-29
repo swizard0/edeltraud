@@ -93,12 +93,6 @@ pub trait ThreadPool<J> {
     fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()>;
 }
 
-impl<J> ThreadPool<J> for Edeltraud<J> where J: Job {
-    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()> {
-        self.inner.spawn(job)
-    }
-}
-
 pub enum AsyncJob<G> where G: Job {
     Master {
         job: G,
@@ -159,18 +153,30 @@ impl<J> Clone for Edeltraud<J> where J: Job {
     }
 }
 
-pub struct EdeltraudJobMap<'a, P, J, G> {
-    thread_pool: &'a P,
+impl<J> ThreadPool<J> for Edeltraud<J> where J: Job {
+    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()> {
+        self.inner.spawn(job)
+    }
+}
+
+impl<'a, P, J> ThreadPool<J> for &'a P where P: ThreadPool<J>, J: Job {
+    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()> {
+        (*self).spawn(job)
+    }
+}
+
+pub struct EdeltraudJobMap<P, J, G> {
+    thread_pool: P,
     _marker: PhantomData<(J, G)>,
 }
 
-impl<'a, P, J, G> EdeltraudJobMap<'a, P, J, G> {
-    pub fn new(thread_pool: &'a P) -> Self {
+impl<P, J, G> EdeltraudJobMap<P, J, G> {
+    pub fn new(thread_pool: P) -> Self {
         Self { thread_pool, _marker: PhantomData, }
     }
 }
 
-impl<'a, P, J, G> ThreadPool<G> for EdeltraudJobMap<'a, P, J, G>
+impl<P, J, G> ThreadPool<G> for EdeltraudJobMap<P, J, G>
 where P: ThreadPool<J>,
       J: Job<Output = ()> + From<G>,
       G: Job,
