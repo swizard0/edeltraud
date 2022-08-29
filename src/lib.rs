@@ -176,6 +176,15 @@ impl<P, J, G> EdeltraudJobMap<P, J, G> {
     }
 }
 
+impl<P, J, G> Clone for EdeltraudJobMap<P, J, G> where P: Clone {
+    fn clone(&self) -> Self {
+        Self {
+            thread_pool: self.thread_pool.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<P, J, G> ThreadPool<G> for EdeltraudJobMap<P, J, G>
 where P: ThreadPool<J>,
       J: Job<Output = ()> + From<G>,
