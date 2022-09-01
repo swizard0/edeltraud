@@ -15,7 +15,7 @@ use super::{
     AsyncJob,
     Edeltraud,
     ThreadPool,
-    EdeltraudJobMap,
+    ThreadPoolMap,
     job_async,
 };
 
@@ -113,7 +113,7 @@ impl Job for WrappedSleepJob {
 
     fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
         let WrappedSleepJob(sleep_job) = self;
-        sleep_job.run(&EdeltraudJobMap::new(thread_pool))
+        sleep_job.run(&ThreadPoolMap::new(thread_pool))
     }
 }
 

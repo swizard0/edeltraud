@@ -37,6 +37,7 @@ pub trait Job: Sized + Send + 'static {
 
 pub struct Edeltraud<J> where J: Job {
     inner: Arc<inner::Inner<J>>,
+    workers: Option<Arc<Vec<thread::JoinHandle<()>>>>,
 }
 
 pub struct Builder {
@@ -51,7 +52,6 @@ impl Builder {
     }
 
     pub fn worker_threads(&mut self, value: usize) -> &mut Self {
-        assert!(value > 0, "Worker threads cannot be set to 0");
         self.worker_threads = Some(value);
         self
     }
@@ -59,27 +59,66 @@ impl Builder {
     pub fn build<J>(&mut self) -> Result<Edeltraud<J>, BuildError> where J: Job {
         let worker_threads = self.worker_threads
             .unwrap_or_else(|| num_cpus::get());
-        let thread_pool: Edeltraud<J> = Edeltraud {
-            inner: Arc::new(inner::Inner::new()),
-        };
-        for slave_index in 0 .. worker_threads {
-            let thread_pool = thread_pool.clone();
-            thread::Builder::new()
-                .name(format!("edeltraud worker {}", slave_index))
+        if worker_threads == 0 {
+            return Err(BuildError::ZeroWorkerThreadsCount);
+        }
+
+        let inner: Arc<inner::Inner<J>> = Arc::new(inner::Inner::new());
+        let mut maybe_error = Ok(());
+        let mut workers = Vec::with_capacity(worker_threads);
+        for worker_index in 0 .. worker_threads {
+            let inner = inner.clone();
+            let maybe_join_handle = thread::Builder::new()
+                .name(format!("edeltraud worker {}", worker_index))
                 .spawn(move || {
+                    let worker_thread_pool = Edeltraud { inner, workers: None, };
                     loop {
-                        let job = thread_pool.inner.acquire_job();
-                        job.run(&thread_pool);
+                        if let Some(job) = worker_thread_pool.inner.acquire_job() {
+                            job.run(&worker_thread_pool);
+                        } else {
+                            break;
+                        }
                     }
                 })
-                .map_err(BuildError::WorkerSpawn)?;
+                .map_err(BuildError::WorkerSpawn);
+            match maybe_join_handle {
+                Ok(join_handle) =>
+                    workers.push(join_handle),
+                Err(error) =>
+                    maybe_error = Err(error),
+            }
         }
+
+        let thread_pool = Edeltraud {
+            inner,
+            workers: Some(Arc::new(workers)),
+        };
+        maybe_error?;
         Ok(thread_pool)
+    }
+}
+
+impl<J> Drop for Edeltraud<J> where J: Job {
+    fn drop(&mut self) {
+        if let Some(workers_arc) = self.workers.take() {
+            if let Ok(workers) = Arc::try_unwrap(workers_arc) {
+                if let Ok(mut locked_state) = self.inner.state.lock() {
+                    if let inner::InnerState::Active(..) = &*locked_state {
+                        *locked_state = inner::InnerState::Terminated;
+                        self.inner.condvar.notify_all();
+                    }
+                }
+                for join_handle in workers {
+                    join_handle.join().ok();
+                }
+            }
+        }
     }
 }
 
 #[derive(Debug)]
 pub enum BuildError {
+    ZeroWorkerThreadsCount,
     WorkerSpawn(io::Error),
 }
 
@@ -130,16 +169,16 @@ impl<G> Job for AsyncJob<G> where G: Job {
     type Output = ();
 
     fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
-        let thread_pool_job_map = EdeltraudJobMap::new(thread_pool);
+        let thread_pool_map = ThreadPoolMap::new(thread_pool);
         match self {
             AsyncJob::Master { job, result_tx, } => {
-                let output = job.run(&thread_pool_job_map);
+                let output = job.run(&thread_pool_map);
                 if let Err(_send_error) = result_tx.send(output) {
                     log::warn!("async result channel dropped before job is finished");
                 }
             },
             AsyncJob::Slave(job) => {
-                job.run(&thread_pool_job_map);
+                job.run(&thread_pool_map);
             },
         }
     }
@@ -149,6 +188,7 @@ impl<J> Clone for Edeltraud<J> where J: Job {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            workers: self.workers.clone(),
         }
     }
 }
@@ -165,18 +205,18 @@ impl<'a, P, J> ThreadPool<J> for &'a P where P: ThreadPool<J>, J: Job {
     }
 }
 
-pub struct EdeltraudJobMap<P, J, G> {
+pub struct ThreadPoolMap<P, J, G> {
     thread_pool: P,
     _marker: PhantomData<(J, G)>,
 }
 
-impl<P, J, G> EdeltraudJobMap<P, J, G> {
+impl<P, J, G> ThreadPoolMap<P, J, G> {
     pub fn new(thread_pool: P) -> Self {
         Self { thread_pool, _marker: PhantomData, }
     }
 }
 
-impl<P, J, G> Clone for EdeltraudJobMap<P, J, G> where P: Clone {
+impl<P, J, G> Clone for ThreadPoolMap<P, J, G> where P: Clone {
     fn clone(&self) -> Self {
         Self {
             thread_pool: self.thread_pool.clone(),
@@ -185,7 +225,7 @@ impl<P, J, G> Clone for EdeltraudJobMap<P, J, G> where P: Clone {
     }
 }
 
-impl<P, J, G> ThreadPool<G> for EdeltraudJobMap<P, J, G>
+impl<P, J, G> ThreadPool<G> for ThreadPoolMap<P, J, G>
 where P: ThreadPool<J>,
       J: Job<Output = ()> + From<G>,
       G: Job,
