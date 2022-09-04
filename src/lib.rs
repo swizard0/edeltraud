@@ -132,7 +132,11 @@ pub trait ThreadPool<J> {
     fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()>;
 }
 
-pub enum AsyncJob<G> where G: Job {
+pub struct AsyncJob<G> where G: Job {
+    inner: AsyncJobInner<G>,
+}
+
+enum AsyncJobInner<G> where G: Job {
     Master {
         job: G,
         result_tx: oneshot::Sender<G::Output>,
@@ -142,7 +146,7 @@ pub enum AsyncJob<G> where G: Job {
 
 impl<G> From<G> for AsyncJob<G> where G: Job {
     fn from(job: G) -> AsyncJob<G> {
-        AsyncJob::Slave(job)
+        AsyncJob { inner: AsyncJobInner::Slave(job), }
     }
 }
 
@@ -159,7 +163,9 @@ where P: ThreadPool<J>,
       G: Job,
 {
     let (result_tx, result_rx) = oneshot::channel();
-    let async_job = AsyncJob::Master { job, result_tx, };
+    let async_job = AsyncJob {
+        inner: AsyncJobInner::Master { job, result_tx, },
+    };
     thread_pool.spawn(async_job.into())?;
 
     Ok(AsyncResult { result_rx, })
@@ -170,14 +176,14 @@ impl<G> Job for AsyncJob<G> where G: Job {
 
     fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
         let thread_pool_map = ThreadPoolMap::new(thread_pool);
-        match self {
-            AsyncJob::Master { job, result_tx, } => {
+        match self.inner {
+            AsyncJobInner::Master { job, result_tx, } => {
                 let output = job.run(&thread_pool_map);
                 if let Err(_send_error) = result_tx.send(output) {
                     log::warn!("async result channel dropped before job is finished");
                 }
             },
-            AsyncJob::Slave(job) => {
+            AsyncJobInner::Slave(job) => {
                 job.run(&thread_pool_map);
             },
         }
