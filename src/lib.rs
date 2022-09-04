@@ -30,9 +30,13 @@ mod inner;
 mod tests;
 
 pub trait Job: Sized + Send + 'static {
-    type Output: Send + 'static;
+    fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self>;
+}
 
-    fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self>;
+pub trait Computation: Sized + Send + 'static {
+    type Output;
+
+    fn run(self) -> Self::Output;
 }
 
 pub struct Edeltraud<J> where J: Job {
@@ -129,63 +133,38 @@ pub enum SpawnError {
 }
 
 pub trait ThreadPool<J> {
-    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()>;
+    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job;
 }
 
-pub struct AsyncJob<G> where G: Job {
-    inner: AsyncJobInner<G>,
-}
-
-enum AsyncJobInner<G> where G: Job {
-    Master {
-        job: G,
-        result_tx: oneshot::Sender<G::Output>,
-    },
-    Slave(G),
-}
-
-impl<G> From<G> for AsyncJob<G> where G: Job {
-    fn from(job: G) -> AsyncJob<G> {
-        AsyncJob { inner: AsyncJobInner::Slave(job), }
-    }
+pub struct AsyncJob<G> where G: Computation {
+    computation: G,
+    result_tx: oneshot::Sender<G::Output>,
 }
 
 pub fn job<P, J, G>(thread_pool: &P, job: G) -> Result<(), SpawnError>
 where P: ThreadPool<J>,
-      J: Job<Output = ()> + From<G>,
+      J: Job + From<G>,
 {
     thread_pool.spawn(job.into())
 }
 
-pub fn job_async<P, J, G>(thread_pool: &P, job: G) -> Result<AsyncResult<G::Output>, SpawnError>
+pub fn job_async<P, J, G>(thread_pool: &P, computation: G) -> Result<AsyncResult<G::Output>, SpawnError>
 where P: ThreadPool<J>,
-      J: Job<Output = ()> + From<AsyncJob<G>>,
-      G: Job,
+      J: Job + From<AsyncJob<G>>,
+      G: Computation,
 {
     let (result_tx, result_rx) = oneshot::channel();
-    let async_job = AsyncJob {
-        inner: AsyncJobInner::Master { job, result_tx, },
-    };
+    let async_job = AsyncJob { computation, result_tx, };
     thread_pool.spawn(async_job.into())?;
 
     Ok(AsyncResult { result_rx, })
 }
 
-impl<G> Job for AsyncJob<G> where G: Job {
-    type Output = ();
-
-    fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
-        let thread_pool_map = ThreadPoolMap::new(thread_pool);
-        match self.inner {
-            AsyncJobInner::Master { job, result_tx, } => {
-                let output = job.run(&thread_pool_map);
-                if let Err(_send_error) = result_tx.send(output) {
-                    log::warn!("async result channel dropped before job is finished");
-                }
-            },
-            AsyncJobInner::Slave(job) => {
-                job.run(&thread_pool_map);
-            },
+impl<G> Job for AsyncJob<G> where G: Computation, G::Output: Send {
+    fn run<P>(self, _thread_pool: &P) where P: ThreadPool<Self> {
+        let output = self.computation.run();
+        if let Err(_send_error) = self.result_tx.send(output) {
+            log::warn!("async result channel dropped before job is finished");
         }
     }
 }
@@ -200,13 +179,13 @@ impl<J> Clone for Edeltraud<J> where J: Job {
 }
 
 impl<J> ThreadPool<J> for Edeltraud<J> where J: Job {
-    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()> {
+    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
         self.inner.spawn(job)
     }
 }
 
 impl<'a, P, J> ThreadPool<J> for &'a P where P: ThreadPool<J>, J: Job {
-    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job<Output = ()> {
+    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
         (*self).spawn(job)
     }
 }
@@ -233,10 +212,10 @@ impl<P, J, G> Clone for ThreadPoolMap<P, J, G> where P: Clone {
 
 impl<P, J, G> ThreadPool<G> for ThreadPoolMap<P, J, G>
 where P: ThreadPool<J>,
-      J: Job<Output = ()> + From<G>,
+      J: Job + From<G>,
       G: Job,
 {
-    fn spawn(&self, job: G) -> Result<(), SpawnError> where G: Job<Output = ()> {
+    fn spawn(&self, job: G) -> Result<(), SpawnError> {
         self.thread_pool.spawn(job.into())
     }
 }

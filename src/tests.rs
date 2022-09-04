@@ -15,16 +15,18 @@ use super::{
     AsyncJob,
     Edeltraud,
     ThreadPool,
+    Computation,
     ThreadPoolMap,
+    job,
     job_async,
 };
 
 struct SleepJob;
 
-impl Job for SleepJob {
+impl Computation for SleepJob {
     type Output = ();
 
-    fn run<P>(self, _thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
+    fn run(self) {
         thread::sleep(Duration::from_millis(100));
     }
 }
@@ -54,18 +56,16 @@ fn basic() {
 }
 
 enum SleepJobRec {
-    Master,
+    Master { sync_tx: mpsc::Sender<WorkComplete>, },
     Slave { tx: mpsc::Sender<WorkComplete>, },
 }
 
 struct WorkComplete;
 
 impl Job for SleepJobRec {
-    type Output = ();
-
-    fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
+    fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self> {
         match self {
-            SleepJobRec::Master => {
+            SleepJobRec::Master { sync_tx, } => {
                 let (tx, rx) = mpsc::channel();
                 for _ in 0 .. 4 {
                     thread_pool.spawn(SleepJobRec::Slave { tx: tx.clone(), })
@@ -74,6 +74,7 @@ impl Job for SleepJobRec {
                 for _ in 0 .. 4 {
                     let WorkComplete = rx.recv().unwrap();
                 }
+                sync_tx.send(WorkComplete).ok();
             },
             SleepJobRec::Slave { tx, } => {
                 thread::sleep(Duration::from_millis(400));
@@ -85,16 +86,16 @@ impl Job for SleepJobRec {
 
 #[test]
 fn recursive_spawn() {
-    let pool: Edeltraud<AsyncJob<SleepJobRec>> = Builder::new()
+    let pool: Edeltraud<SleepJobRec> = Builder::new()
         .worker_threads(5)
         .build()
         .unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
     let now = Instant::now();
-    runtime.block_on(job_async(&pool, SleepJobRec::Master).unwrap())
-        .unwrap();
+
+    let (sync_tx, sync_rx) = mpsc::channel();
+    job(&pool, SleepJobRec::Master { sync_tx, }).unwrap();
+    let WorkComplete = sync_rx.recv().unwrap();
+
     let elapsed = now.elapsed().as_secs_f64();
     assert!(elapsed >= 0.4);
     assert!(elapsed < 0.5);
@@ -109,9 +110,7 @@ impl From<AsyncJob<SleepJob>> for WrappedSleepJob {
 }
 
 impl Job for WrappedSleepJob {
-    type Output = ();
-
-    fn run<P>(self, thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
+    fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self> {
         let WrappedSleepJob(sleep_job) = self;
         sleep_job.run(&ThreadPoolMap::new(thread_pool))
     }
@@ -143,10 +142,10 @@ fn multilayer_job() {
 
 struct SleepJobValue(isize);
 
-impl Job for SleepJobValue {
+impl Computation for SleepJobValue {
     type Output = isize;
 
-    fn run<P>(self, _thread_pool: &P) -> Self::Output where P: ThreadPool<Self> {
+    fn run(self) -> Self::Output {
         thread::sleep(Duration::from_millis(400));
         self.0
     }
