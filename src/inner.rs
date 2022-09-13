@@ -53,6 +53,8 @@ impl<J> Inner<J> {
     {
         let backoff = crossbeam::utils::Backoff::new();
         let mut steal = crossbeam::deque::Steal::Retry;
+
+        self.waiting_queue[worker_index].store(true, atomic::Ordering::SeqCst);
         'outer: loop {
             if self.is_terminated.load(atomic::Ordering::SeqCst) {
                 return None;
@@ -62,7 +64,6 @@ impl<J> Inner<J> {
                 crossbeam::deque::Steal::Empty => {
                     // nothing to do, sleeping
                     if backoff.is_completed() {
-                        self.waiting_queue[worker_index].store(true, atomic::Ordering::SeqCst);
                         loop {
                             thread::park();
                             if !self.waiting_queue[worker_index].load(atomic::Ordering::SeqCst) ||
@@ -77,8 +78,10 @@ impl<J> Inner<J> {
                     steal = crossbeam::deque::Steal::Retry;
                     continue 'outer;
                 },
-                crossbeam::deque::Steal::Success(job) =>
-                    return Some(job),
+                crossbeam::deque::Steal::Success(job) => {
+                    self.waiting_queue[worker_index].store(false, atomic::Ordering::SeqCst);
+                    return Some(job);
+                },
                 crossbeam::deque::Steal::Retry =>
                     (),
             }
