@@ -97,7 +97,7 @@ impl Builder {
                 .spawn(move || {
                     let worker_thread_pool = LocalEdeltraud { sched_worker: &sched_worker };
                     loop {
-                        if let Some(job) = inner.acquire_job(&sched_worker, &sched_stealers) {
+                        if let Some(job) = inner.acquire_job(worker_index, &sched_worker, &sched_stealers) {
                             job.run(&worker_thread_pool);
                         } else {
                             break;
@@ -127,7 +127,7 @@ impl<J> Drop for Edeltraud<J> where J: Job {
         if let Some(workers_arc) = self.workers.take() {
             if let Ok(workers) = Arc::try_unwrap(workers_arc) {
                 for _ in &workers {
-                    self.inner.command(inner::Command::Terminate);
+                    self.inner.command(inner::Command::Terminate, Some(&workers));
                 }
                 for join_handle in workers {
                     join_handle.thread().unpark();
@@ -198,7 +198,7 @@ impl<J> Clone for Edeltraud<J> where J: Job {
 
 impl<J> ThreadPool<J> for Edeltraud<J> where J: Job {
     fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        self.inner.command(inner::Command::Job(job));
+        self.inner.command(inner::Command::Job(job), self.workers.as_ref().map(|v| &***v));
         Ok(())
     }
 }

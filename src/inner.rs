@@ -1,4 +1,7 @@
 use std::{
+    sync::{
+        atomic,
+    },
     thread,
 };
 
@@ -9,26 +12,33 @@ pub enum Command<J> {
 
 pub struct Inner<J> {
     injector: crossbeam::deque::Injector<Command<J>>,
-    waiting_queue: crossbeam::queue::ArrayQueue<thread::Thread>,
+    waiting_queue: Vec<atomic::AtomicBool>,
 }
 
 impl<J> Inner<J> {
     pub fn new(workers_count: usize) -> Self {
         Self {
             injector: crossbeam::deque::Injector::new(),
-            waiting_queue: crossbeam::queue::ArrayQueue::new(workers_count),
+            waiting_queue: (0 .. workers_count)
+                .map(|_| atomic::AtomicBool::new(false))
+                .collect(),
         }
     }
 
-    pub fn command(&self, command: Command<J>) {
+    pub fn command(&self, command: Command<J>, maybe_workers: Option<&[thread::JoinHandle<()>]>) {
         self.injector.push(command);
-        if let Some(thread) = self.waiting_queue.pop() {
-            thread.unpark();
+        if let Some(workers) = maybe_workers {
+            for (join_handle, waiting_flag) in workers.iter().zip(self.waiting_queue.iter()) {
+                if waiting_flag.swap(false, atomic::Ordering::SeqCst) {
+                    join_handle.thread().unpark();
+                }
+            }
         }
     }
 
     pub fn acquire_job(
         &self,
+        worker_index: usize,
         sched_worker: &crossbeam::deque::Worker<Command<J>>,
         sched_stealers: &[crossbeam::deque::Stealer<Command<J>>],
     )
@@ -41,10 +51,9 @@ impl<J> Inner<J> {
                 crossbeam::deque::Steal::Empty => {
                     // nothing to do, sleeping
                     if backoff.is_completed() {
-                        self.waiting_queue
-                            .push(thread::current())
-                            .unwrap();
+                        self.waiting_queue[worker_index].store(true, atomic::Ordering::SeqCst);
                         thread::park();
+                        self.waiting_queue[worker_index].store(false, atomic::Ordering::SeqCst);
                     } else {
                         backoff.snooze();
                     }
