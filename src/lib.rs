@@ -67,17 +67,37 @@ impl Builder {
             return Err(BuildError::ZeroWorkerThreadsCount);
         }
 
-        let inner: Arc<inner::Inner<J>> = Arc::new(inner::Inner::new());
+        let sched_workers: Vec<_> = (0 .. worker_threads)
+            .map(|_| crossbeam::deque::Worker::new_lifo())
+            .collect();
+        let mut sched_stealers = Vec::with_capacity(worker_threads);
+        for worker_index in 0 .. worker_threads {
+            let stealers: Vec<_> = (0 .. worker_threads)
+                .flat_map(|stealer_index| if worker_index == stealer_index {
+                    None
+                } else {
+                    Some(sched_workers[stealer_index].stealer())
+                })
+                .collect();
+            sched_stealers.push(stealers);
+        }
+
+        let inner: Arc<inner::Inner<J>> =
+            Arc::new(inner::Inner::new(worker_threads));
+
         let mut maybe_error = Ok(());
         let mut workers = Vec::with_capacity(worker_threads);
-        for worker_index in 0 .. worker_threads {
+        let sched_iter = sched_workers.into_iter()
+            .zip(sched_stealers.into_iter())
+            .enumerate();
+        for (worker_index, (sched_worker, sched_stealers)) in sched_iter {
             let inner = inner.clone();
             let maybe_join_handle = thread::Builder::new()
                 .name(format!("edeltraud worker {}", worker_index))
                 .spawn(move || {
-                    let worker_thread_pool = Edeltraud { inner, workers: None, };
+                    let worker_thread_pool = LocalEdeltraud { sched_worker: &sched_worker };
                     loop {
-                        if let Some(job) = worker_thread_pool.inner.acquire_job() {
+                        if let Some(job) = inner.acquire_job(&sched_worker, &sched_stealers) {
                             job.run(&worker_thread_pool);
                         } else {
                             break;
@@ -106,13 +126,11 @@ impl<J> Drop for Edeltraud<J> where J: Job {
     fn drop(&mut self) {
         if let Some(workers_arc) = self.workers.take() {
             if let Ok(workers) = Arc::try_unwrap(workers_arc) {
-                if let Ok(mut locked_state) = self.inner.state.lock() {
-                    if let inner::InnerState::Active(..) = &*locked_state {
-                        *locked_state = inner::InnerState::Terminated;
-                        self.inner.condvar.notify_all();
-                    }
+                for _ in &workers {
+                    self.inner.command(inner::Command::Terminate);
                 }
                 for join_handle in workers {
+                    join_handle.thread().unpark();
                     join_handle.join().ok();
                 }
             }
@@ -180,7 +198,8 @@ impl<J> Clone for Edeltraud<J> where J: Job {
 
 impl<J> ThreadPool<J> for Edeltraud<J> where J: Job {
     fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        self.inner.spawn(job)
+        self.inner.command(inner::Command::Job(job));
+        Ok(())
     }
 }
 
@@ -217,6 +236,17 @@ where P: ThreadPool<J>,
 {
     fn spawn(&self, job: G) -> Result<(), SpawnError> {
         self.thread_pool.spawn(job.into())
+    }
+}
+
+struct LocalEdeltraud<'a, J> {
+    sched_worker: &'a crossbeam::deque::Worker<inner::Command<J>>,
+}
+
+impl<'a, J> ThreadPool<J> for LocalEdeltraud<'a, J> where J: Job {
+    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
+        self.sched_worker.push(inner::Command::Job(job));
+        Ok(())
     }
 }
 

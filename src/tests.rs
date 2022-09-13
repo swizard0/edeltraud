@@ -51,8 +51,8 @@ fn basic() {
         let _: Vec<()> = futures::future::try_join_all(tasks).await.unwrap();
     });
     let elapsed = now.elapsed().as_secs_f64();
-    assert!(elapsed >= 0.4);
-    assert!(elapsed < 0.5);
+    assert!(elapsed >= 0.4, "elapsed expected to be >= 0.4, but it is {elapsed:?}");
+    assert!(elapsed < 0.5, "elapsed expected to be < 0.5, but it is {elapsed:?}");
 }
 
 enum SleepJobRec {
@@ -97,8 +97,8 @@ fn recursive_spawn() {
     let WorkComplete = sync_rx.recv().unwrap();
 
     let elapsed = now.elapsed().as_secs_f64();
-    assert!(elapsed >= 0.4);
-    assert!(elapsed < 0.5);
+    assert!(elapsed >= 0.4, "elapsed expected to be >= 0.4, but it is {elapsed:?}");
+    assert!(elapsed < 0.5, "elapsed expected to be < 0.5, but it is {elapsed:?}");
 }
 
 struct WrappedSleepJob(AsyncJob<SleepJob>);
@@ -136,8 +136,8 @@ fn multilayer_job() {
         let _: Vec<()> = futures::future::try_join_all(tasks).await.unwrap();
     });
     let elapsed = now.elapsed().as_secs_f64();
-    assert!(elapsed >= 0.4);
-    assert!(elapsed < 0.5);
+    assert!(elapsed >= 0.4, "elapsed expected to be >= 0.4, but it is {elapsed:?}");
+    assert!(elapsed < 0.5, "elapsed expected to be < 0.5, but it is {elapsed:?}");
 }
 
 struct SleepJobValue(isize);
@@ -164,7 +164,7 @@ fn async_job() {
     let value = runtime.block_on(job_async(&pool, SleepJobValue(144)).unwrap())
         .unwrap();
     let elapsed = now.elapsed().as_secs_f64();
-    assert!(elapsed >= 0.4);
-    assert!(elapsed < 0.5);
+    assert!(elapsed >= 0.4, "elapsed expected to be >= 0.4, but it is {elapsed:?}");
+    assert!(elapsed < 0.5, "elapsed expected to be < 0.5, but it is {elapsed:?}");
     assert_eq!(value, 144);
 }
