@@ -156,7 +156,6 @@ pub enum BuildError {
 
 #[derive(Debug)]
 pub enum SpawnError {
-    MutexLock,
     ThreadPoolGone,
 }
 
