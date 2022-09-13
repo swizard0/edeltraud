@@ -10,6 +10,7 @@ use std::{
         Poll,
     },
     sync::{
+        atomic,
         Arc,
     },
     marker::{
@@ -95,12 +96,23 @@ impl Builder {
             let maybe_join_handle = thread::Builder::new()
                 .name(format!("edeltraud worker {}", worker_index))
                 .spawn(move || {
+                    let _drop_bomb = DropBomp { is_terminated: &inner.is_terminated, };
                     let worker_thread_pool = LocalEdeltraud { sched_worker: &sched_worker };
                     loop {
                         if let Some(job) = inner.acquire_job(worker_index, &sched_worker, &sched_stealers) {
                             job.run(&worker_thread_pool);
                         } else {
                             break;
+                        }
+                    }
+
+                    struct DropBomp<'a> {
+                        is_terminated: &'a atomic::AtomicBool,
+                    }
+
+                    impl<'a> Drop for DropBomp<'a> {
+                        fn drop(&mut self) {
+                            self.is_terminated.store(true, atomic::Ordering::SeqCst);
                         }
                     }
                 })
@@ -126,9 +138,7 @@ impl<J> Drop for Edeltraud<J> where J: Job {
     fn drop(&mut self) {
         if let Some(workers_arc) = self.workers.take() {
             if let Ok(workers) = Arc::try_unwrap(workers_arc) {
-                for _ in &workers {
-                    self.inner.command(inner::Command::Terminate, Some(&workers));
-                }
+                self.inner.is_terminated.store(true, atomic::Ordering::SeqCst);
                 for join_handle in workers {
                     join_handle.thread().unpark();
                     join_handle.join().ok();
@@ -198,8 +208,7 @@ impl<J> Clone for Edeltraud<J> where J: Job {
 
 impl<J> ThreadPool<J> for Edeltraud<J> where J: Job {
     fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        self.inner.command(inner::Command::Job(job), self.workers.as_ref().map(|v| &***v));
-        Ok(())
+        self.inner.spawn(job, self.workers.as_ref().map(|v| &***v))
     }
 }
 
@@ -240,12 +249,12 @@ where P: ThreadPool<J>,
 }
 
 struct LocalEdeltraud<'a, J> {
-    sched_worker: &'a crossbeam::deque::Worker<inner::Command<J>>,
+    sched_worker: &'a crossbeam::deque::Worker<J>,
 }
 
 impl<'a, J> ThreadPool<J> for LocalEdeltraud<'a, J> where J: Job {
     fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        self.sched_worker.push(inner::Command::Job(job));
+        self.sched_worker.push(job);
         Ok(())
     }
 }

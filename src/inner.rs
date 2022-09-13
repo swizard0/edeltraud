@@ -5,14 +5,14 @@ use std::{
     thread,
 };
 
-pub enum Command<J> {
-    Job(J),
-    Terminate,
-}
+use crate::{
+    SpawnError,
+};
 
 pub struct Inner<J> {
-    injector: crossbeam::deque::Injector<Command<J>>,
+    injector: crossbeam::deque::Injector<J>,
     waiting_queue: Vec<atomic::AtomicBool>,
+    pub is_terminated: atomic::AtomicBool,
 }
 
 impl<J> Inner<J> {
@@ -22,55 +22,70 @@ impl<J> Inner<J> {
             waiting_queue: (0 .. workers_count)
                 .map(|_| atomic::AtomicBool::new(false))
                 .collect(),
+            is_terminated: atomic::AtomicBool::new(false),
         }
     }
 
-    pub fn command(&self, command: Command<J>, maybe_workers: Option<&[thread::JoinHandle<()>]>) {
-        self.injector.push(command);
+    pub fn spawn(&self, job: J, maybe_workers: Option<&[thread::JoinHandle<()>]>) -> Result<(), SpawnError> {
+        if self.is_terminated.load(atomic::Ordering::SeqCst) {
+            return Err(SpawnError::ThreadPoolGone);
+        }
+        self.injector.push(job);
         if let Some(workers) = maybe_workers {
             for (join_handle, waiting_flag) in workers.iter().zip(self.waiting_queue.iter()) {
                 if waiting_flag.swap(false, atomic::Ordering::SeqCst) {
                     join_handle.thread().unpark();
+                    break;
                 }
             }
         }
+
+        Ok(())
     }
 
     pub fn acquire_job(
         &self,
         worker_index: usize,
-        sched_worker: &crossbeam::deque::Worker<Command<J>>,
-        sched_stealers: &[crossbeam::deque::Stealer<Command<J>>],
+        sched_worker: &crossbeam::deque::Worker<J>,
+        sched_stealers: &[crossbeam::deque::Stealer<J>],
     )
         -> Option<J>
     {
         let backoff = crossbeam::utils::Backoff::new();
         let mut steal = crossbeam::deque::Steal::Retry;
         'outer: loop {
+            if self.is_terminated.load(atomic::Ordering::SeqCst) {
+                return None;
+            }
+
             match steal {
                 crossbeam::deque::Steal::Empty => {
                     // nothing to do, sleeping
                     if backoff.is_completed() {
                         self.waiting_queue[worker_index].store(true, atomic::Ordering::SeqCst);
-                        thread::park();
-                        self.waiting_queue[worker_index].store(false, atomic::Ordering::SeqCst);
+                        loop {
+                            thread::park();
+                            if !self.waiting_queue[worker_index].load(atomic::Ordering::SeqCst) ||
+                                self.is_terminated.load(atomic::Ordering::SeqCst)
+                            {
+                                break;
+                            }
+                        }
                     } else {
                         backoff.snooze();
                     }
                     steal = crossbeam::deque::Steal::Retry;
                     continue 'outer;
                 },
-                crossbeam::deque::Steal::Success(Command::Job(job)) =>
+                crossbeam::deque::Steal::Success(job) =>
                     return Some(job),
-                crossbeam::deque::Steal::Success(Command::Terminate) =>
-                    return None,
                 crossbeam::deque::Steal::Retry =>
                     (),
             }
 
             // first try to acquire a job from the local queue
-            if let Some(command) = sched_worker.pop() {
-                steal = crossbeam::deque::Steal::Success(command);
+            if let Some(job) = sched_worker.pop() {
+                steal = crossbeam::deque::Steal::Success(job);
                 continue 'outer;
             }
 
@@ -80,8 +95,8 @@ impl<J> Inner<J> {
             match self.injector.steal_batch_and_pop(sched_worker) {
                 crossbeam::deque::Steal::Empty =>
                     (),
-                crossbeam::deque::Steal::Success(command) => {
-                    steal = crossbeam::deque::Steal::Success(command);
+                crossbeam::deque::Steal::Success(job) => {
+                    steal = crossbeam::deque::Steal::Success(job);
                     continue 'outer;
                 }
                 crossbeam::deque::Steal::Retry =>
@@ -93,8 +108,8 @@ impl<J> Inner<J> {
                 match sched_stealer.steal_batch_and_pop(sched_worker) {
                     crossbeam::deque::Steal::Empty =>
                         (),
-                    crossbeam::deque::Steal::Success(command) => {
-                        steal = crossbeam::deque::Steal::Success(command);
+                    crossbeam::deque::Steal::Success(job) => {
+                        steal = crossbeam::deque::Steal::Success(job);
                         continue 'outer;
                     }
                     crossbeam::deque::Steal::Retry =>
