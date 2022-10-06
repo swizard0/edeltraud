@@ -35,7 +35,6 @@ impl<J> Inner<J> {
             for (join_handle, waiting_flag) in workers.iter().zip(self.waiting_queue.iter()) {
                 if waiting_flag.swap(false, atomic::Ordering::SeqCst) {
                     join_handle.thread().unpark();
-                    break;
                 }
             }
         }
@@ -66,7 +65,7 @@ impl<J> Inner<J> {
                     if backoff.is_completed() {
                         loop {
                             thread::park();
-                            if !self.waiting_queue[worker_index].load(atomic::Ordering::SeqCst) ||
+                            if !self.waiting_queue[worker_index].swap(true, atomic::Ordering::SeqCst) ||
                                 self.is_terminated.load(atomic::Ordering::SeqCst)
                             {
                                 break;
