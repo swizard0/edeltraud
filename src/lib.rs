@@ -31,7 +31,7 @@ mod inner;
 mod tests;
 
 pub trait Job: Sized + Send + 'static {
-    fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self>;
+    fn run<P, J>(self, thread_pool: &P) where P: ThreadPool<J>, J: Job + From<Self>;
 }
 
 pub trait Computation: Sized + Send + 'static {
@@ -190,7 +190,7 @@ where P: ThreadPool<J>,
 }
 
 impl<G> Job for AsyncJob<G> where G: Computation, G::Output: Send {
-    fn run<P>(self, _thread_pool: &P) where P: ThreadPool<Self> {
+    fn run<P, J>(self, _thread_pool: &P) where P: ThreadPool<J>, J: Job + From<Self> {
         let output = self.computation.run();
         if let Err(_send_error) = self.result_tx.send(output) {
             log::warn!("async result channel dropped before job is finished");

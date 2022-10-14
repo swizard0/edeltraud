@@ -63,12 +63,12 @@ enum SleepJobRec {
 struct WorkComplete;
 
 impl Job for SleepJobRec {
-    fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self> {
+    fn run<P, J>(self, thread_pool: &P) where P: ThreadPool<J>, J: Job + From<Self> {
         match self {
             SleepJobRec::Master { sync_tx, } => {
                 let (tx, rx) = mpsc::channel();
                 for _ in 0 .. 4 {
-                    thread_pool.spawn(SleepJobRec::Slave { tx: tx.clone(), })
+                    thread_pool.spawn(SleepJobRec::Slave { tx: tx.clone(), }.into())
                         .unwrap();
                 }
                 for _ in 0 .. 4 {
@@ -110,7 +110,7 @@ impl From<AsyncJob<SleepJob>> for WrappedSleepJob {
 }
 
 impl Job for WrappedSleepJob {
-    fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self> {
+    fn run<P, J>(self, thread_pool: &P) where P: ThreadPool<J>, J: Job + From<Self> {
         let WrappedSleepJob(sleep_job) = self;
         sleep_job.run(&ThreadPoolMap::new(thread_pool))
     }
