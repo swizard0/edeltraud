@@ -49,6 +49,12 @@ pub struct Builder {
     worker_threads: Option<usize>,
 }
 
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Builder {
     pub fn new() -> Builder {
         Builder {
@@ -63,7 +69,7 @@ impl Builder {
 
     pub fn build<J>(&mut self) -> Result<Edeltraud<J>, BuildError> where J: Job {
         let worker_threads = self.worker_threads
-            .unwrap_or_else(|| num_cpus::get());
+            .unwrap_or_else(num_cpus::get);
         if worker_threads == 0 {
             return Err(BuildError::ZeroWorkerThreadsCount);
         }
@@ -98,12 +104,8 @@ impl Builder {
                 .spawn(move || {
                     let _drop_bomb = DropBomp { is_terminated: &inner.is_terminated, };
                     let worker_thread_pool = LocalEdeltraud { sched_worker: &sched_worker };
-                    loop {
-                        if let Some(job) = inner.acquire_job(worker_index, &sched_worker, &sched_stealers) {
-                            job.run(&worker_thread_pool);
-                        } else {
-                            break;
-                        }
+                    while let Some(job) = inner.acquire_job(worker_index, &sched_worker, &sched_stealers) {
+                        job.run(&worker_thread_pool);
                     }
 
                     struct DropBomp<'a> {
