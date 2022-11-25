@@ -11,6 +11,8 @@ use std::{
     },
     sync::{
         Arc,
+        Mutex,
+        Condvar,
     },
     marker::{
         PhantomData,
@@ -41,6 +43,7 @@ pub trait Computation: Sized + Send + 'static {
 
 pub struct Edeltraud<J> where J: Job {
     inner: Arc<inner::Inner<J>>,
+    threads: Arc<Vec<thread::Thread>>,
     workers: Option<Arc<Vec<thread::JoinHandle<()>>>>,
 }
 
@@ -78,13 +81,35 @@ impl Builder {
 
         let mut maybe_error = Ok(());
         let mut workers = Vec::with_capacity(worker_threads);
+        let workers_sync: Arc<(Mutex<Option<Arc<Vec<_>>>>, Condvar)> =
+            Arc::new((Mutex::new(None), Condvar::new()));
         for worker_index in 0 .. worker_threads {
             let inner = inner.clone();
+            let workers_sync = workers_sync.clone();
             let maybe_join_handle = thread::Builder::new()
                 .name(format!("edeltraud worker {}", worker_index))
                 .spawn(move || {
-                    let worker_thread_pool = LocalEdeltraud { inner_ref: &inner, };
-                    while let Some(job) = inner.acquire_job() {
+                    let threads = 'outer: loop {
+                        let Ok(mut workers_sync_lock) =
+                            workers_sync.0.lock() else { return; };
+                        loop {
+                            if let Some(threads) = workers_sync_lock.as_ref() {
+                                break 'outer threads.clone();
+                            }
+                            let Ok(next_workers_sync_lock) =
+                                workers_sync.1.wait(workers_sync_lock) else { return; };
+                            workers_sync_lock = next_workers_sync_lock;
+                            if inner.is_terminated() {
+                                return;
+                            }
+                        }
+                    };
+
+                    let worker_thread_pool = LocalEdeltraud {
+                        inner_ref: &inner,
+                        threads_ref: &threads,
+                    };
+                    while let Some(job) = inner.acquire_job(worker_index) {
                         job.run(&worker_thread_pool);
                     }
                 })
@@ -97,10 +122,22 @@ impl Builder {
             }
         }
 
+        let threads: Arc<Vec<_>> = Arc::new(
+            workers.iter()
+                .map(|handle| handle.thread().clone())
+                .collect(),
+        );
+        if let Ok(mut workers_sync_lock) = workers_sync.0.lock() {
+            *workers_sync_lock = Some(threads.clone());
+            workers_sync.1.notify_all();
+        }
+
         let thread_pool = Edeltraud {
             inner,
+            threads,
             workers: Some(Arc::new(workers)),
         };
+
         maybe_error?;
         Ok(thread_pool)
     }
@@ -109,8 +146,8 @@ impl Builder {
 impl<J> Drop for Edeltraud<J> where J: Job {
     fn drop(&mut self) {
         if let Some(workers_arc) = self.workers.take() {
+            self.inner.force_terminate(&self.threads);
             if let Ok(workers) = Arc::try_unwrap(workers_arc) {
-                self.inner.force_terminate();
                 for join_handle in workers {
                     join_handle.join().ok();
                 }
@@ -173,6 +210,7 @@ impl<J> Clone for Edeltraud<J> where J: Job {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            threads: self.threads.clone(),
             workers: self.workers.clone(),
         }
     }
@@ -180,7 +218,7 @@ impl<J> Clone for Edeltraud<J> where J: Job {
 
 impl<J> ThreadPool<J> for Edeltraud<J> where J: Job {
     fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        self.inner.spawn(job)
+        self.inner.spawn(job, &self.threads)
     }
 }
 
@@ -222,17 +260,18 @@ where P: ThreadPool<J>,
 
 struct LocalEdeltraud<'a, J> {
     inner_ref: &'a inner::Inner<J>,
+    threads_ref: &'a [thread::Thread],
 }
 
 impl<'a, J> Drop for LocalEdeltraud<'a, J> {
     fn drop(&mut self) {
-        self.inner_ref.force_terminate();
+        self.inner_ref.force_terminate(self.threads_ref);
     }
 }
 
 impl<'a, J> ThreadPool<J> for LocalEdeltraud<'a, J> where J: Job {
     fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        self.inner_ref.spawn(job)
+        self.inner_ref.spawn(job, self.threads_ref)
     }
 }
 
