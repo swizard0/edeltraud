@@ -6,6 +6,8 @@ use std::{
     },
     sync::{
         mpsc,
+        atomic,
+        Arc,
     },
 };
 
@@ -167,4 +169,48 @@ fn async_job() {
     assert!(elapsed >= 0.4, "elapsed expected to be >= 0.4, but it is {elapsed:?}");
     assert!(elapsed < 0.5, "elapsed expected to be < 0.5, but it is {elapsed:?}");
     assert_eq!(value, 144);
+}
+
+#[test]
+fn small_stress_job() {
+    const JOBS_COUNT: usize = 256;
+    const SUBJOBS_COUNT: usize = 256;
+
+    let shared_counter = Arc::new(atomic::AtomicUsize::new(0));
+
+    struct StressJob {
+        shared_counter: Arc<atomic::AtomicUsize>,
+        allow_rec: bool,
+    }
+
+    impl Job for StressJob {
+        fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self> {
+            if self.allow_rec {
+                for _ in 0 .. SUBJOBS_COUNT {
+                    thread_pool
+                        .spawn(StressJob {
+                            shared_counter: self.shared_counter.clone(),
+                            allow_rec: false,
+                        })
+                        .unwrap();
+                }
+            } else {
+                self.shared_counter.fetch_add(1, atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    let thread_pool: Edeltraud<StressJob> = Builder::new()
+        .worker_threads(4)
+        .build()
+        .unwrap();
+
+    for _ in 0 .. JOBS_COUNT {
+        thread_pool.spawn(StressJob { shared_counter: shared_counter.clone(), allow_rec: true, })
+            .unwrap();
+    }
+
+    while shared_counter.load(atomic::Ordering::Relaxed) < JOBS_COUNT * SUBJOBS_COUNT {
+        thread::sleep(Duration::from_millis(50));
+    }
 }

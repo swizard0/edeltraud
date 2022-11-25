@@ -66,13 +66,10 @@ impl<J> Inner<J> {
             .map_err(|_| SpawnError::BucketMutexPoisoned)?;
         slot.jobs_queue.push(job);
         bucket.jobs_count.fetch_add(1, atomic::Ordering::Relaxed);
-        // let taken_by = bucket.taken_by.load(atomic::Ordering::SeqCst);
-        // if taken_by > 0 {
-        //     let worker_index = taken_by - 1;
-        //     threads[worker_index].unpark();
-        // }
-        for thread in threads {
-            thread.unpark();
+        let taken_by = bucket.taken_by.load(atomic::Ordering::SeqCst);
+        if taken_by > 0 {
+            let worker_index = taken_by - 1;
+            threads[worker_index].unpark();
         }
 
         Ok(())
