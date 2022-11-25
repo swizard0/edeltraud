@@ -60,6 +60,10 @@ impl<J> Inner<J> {
     }
 
     pub fn spawn(&self, job: J, threads: &[thread::Thread]) -> Result<(), SpawnError> {
+        if self.is_terminated() {
+            return Err(SpawnError::ThreadPoolGone);
+        }
+
         let bucket_index = self.spawn_index_counter.fetch_add(1, atomic::Ordering::Relaxed) % self.buckets.len();
         let bucket = &self.buckets[bucket_index];
         let mut slot = bucket.slot.lock()

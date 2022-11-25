@@ -146,11 +146,12 @@ impl Builder {
 impl<J> Drop for Edeltraud<J> where J: Job {
     fn drop(&mut self) {
         if let Some(workers_arc) = self.workers.take() {
-            self.inner.force_terminate(&self.threads);
             if let Ok(workers) = Arc::try_unwrap(workers_arc) {
+                self.inner.force_terminate(&self.threads);
                 for join_handle in workers {
                     join_handle.join().ok();
                 }
+
             }
         }
     }
