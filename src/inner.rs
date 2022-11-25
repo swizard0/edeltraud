@@ -5,9 +5,13 @@ use std::{
         Mutex,
         TryLockError,
     },
+    time::{
+        Instant,
+    },
 };
 
 use crate::{
+    Timings,
     SpawnError,
     BuildError,
 };
@@ -104,7 +108,7 @@ pub struct Inner<J> {
 }
 
 impl<J> Inner<J> {
-    pub fn new(workers_count: usize) -> Result<Self, BuildError> {
+    pub(super) fn new(workers_count: usize) -> Result<Self, BuildError> {
         Ok(Self {
             buckets: (0 .. workers_count)
                 .map(|_| Bucket::default())
@@ -115,14 +119,14 @@ impl<J> Inner<J> {
         })
     }
 
-    pub fn force_terminate(&self, threads: &[thread::Thread]) {
+    pub(super) fn force_terminate(&self, threads: &[thread::Thread]) {
         self.is_terminated.store(true, atomic::Ordering::SeqCst);
         for thread in threads {
             thread.unpark();
         }
     }
 
-    pub fn spawn(&self, job: J, threads: &[thread::Thread]) -> Result<(), SpawnError> {
+    pub(super) fn spawn(&self, job: J, threads: &[thread::Thread]) -> Result<(), SpawnError> {
         loop {
             if self.is_terminated() {
                 return Err(SpawnError::ThreadPoolGone);
@@ -147,7 +151,14 @@ impl<J> Inner<J> {
         }
     }
 
-    pub fn acquire_job(&self, worker_index: usize) -> Option<J> {
+    pub(super) fn acquire_job(&self, worker_index: usize, timings: &mut Timings) -> Option<J> {
+        let now = Instant::now();
+        let maybe_job = self.actually_acquire_job(worker_index, timings);
+        timings.acquire_job += now.elapsed();
+        maybe_job
+    }
+
+    fn actually_acquire_job(&self, worker_index: usize, timings: &mut Timings) -> Option<J> {
         'outer: loop {
             if self.is_terminated() {
                 return None;
@@ -190,7 +201,9 @@ impl<J> Inner<J> {
                 }
 
                 // nothing interesting, wait for something to occur
+                let now = Instant::now();
                 thread::park();
+                timings.acquire_job_thread_park += now.elapsed();
                 if self.is_terminated() {
                     return None;
                 }
@@ -203,7 +216,7 @@ impl<J> Inner<J> {
         }
     }
 
-    pub fn is_terminated(&self) -> bool {
+    pub(super) fn is_terminated(&self) -> bool {
         self.is_terminated.load(atomic::Ordering::Relaxed)
     }
 }

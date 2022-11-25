@@ -17,6 +17,10 @@ use std::{
     marker::{
         PhantomData,
     },
+    time::{
+        Instant,
+        Duration,
+    },
 };
 
 use futures::{
@@ -55,6 +59,13 @@ impl Default for Builder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Debug, Default)]
+struct Timings {
+    acquire_job: Duration,
+    acquire_job_thread_park: Duration,
+    job_run: Duration,
 }
 
 impl Builder {
@@ -105,12 +116,15 @@ impl Builder {
                         }
                     };
 
-                    let worker_thread_pool = LocalEdeltraud {
+                    let mut worker_thread_pool = LocalEdeltraud {
                         inner_ref: &inner,
                         threads_ref: &threads,
+                        timings: Timings::default(),
                     };
-                    while let Some(job) = inner.acquire_job(worker_index) {
+                    while let Some(job) = inner.acquire_job(worker_index, &mut worker_thread_pool.timings) {
+                        let now = Instant::now();
                         job.run(&worker_thread_pool);
+                        worker_thread_pool.timings.job_run += now.elapsed();
                     }
                 })
                 .map_err(BuildError::WorkerSpawn);
@@ -262,11 +276,13 @@ where P: ThreadPool<J>,
 struct LocalEdeltraud<'a, J> {
     inner_ref: &'a inner::Inner<J>,
     threads_ref: &'a [thread::Thread],
+    timings: Timings,
 }
 
 impl<'a, J> Drop for LocalEdeltraud<'a, J> {
     fn drop(&mut self) {
         self.inner_ref.force_terminate(self.threads_ref);
+        log::info!("LocalEdeltraud::drop on {:?}, timings: {:?}", thread::current(), self.timings);
     }
 }
 
