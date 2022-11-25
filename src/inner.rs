@@ -84,7 +84,7 @@ impl<J> Inner<J> {
         let bucket_index = self.await_index_counter.fetch_add(1, atomic::Ordering::Relaxed) % self.buckets.len();
         let bucket = &self.buckets[bucket_index];
         let mut slot = bucket.slot.lock().ok()?;
-        assert!(!slot.pending_await);
+        assert!(!slot.pending_await, "slot pending await detected while acquire_job: bucket_index = {bucket_index}, #buckets = {}", self.buckets.len());
         while slot.jobs_queue.is_empty() {
             slot.pending_await = true;
             slot = bucket.condvar.wait(slot).ok()?;
