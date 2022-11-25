@@ -153,6 +153,7 @@ impl Builder {
         };
 
         maybe_error?;
+        log::debug!("Edeltraud::new() success with {} workers", thread_pool.threads.len());
         Ok(thread_pool)
     }
 }
@@ -161,6 +162,7 @@ impl<J> Drop for Edeltraud<J> where J: Job {
     fn drop(&mut self) {
         if let Some(workers_arc) = self.workers.take() {
             if let Ok(workers) = Arc::try_unwrap(workers_arc) {
+                log::debug!("Edeltraud::drop() invoked");
                 self.inner.force_terminate(&self.threads);
                 for join_handle in workers {
                     join_handle.join().ok();
