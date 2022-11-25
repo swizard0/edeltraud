@@ -3,6 +3,7 @@ use std::{
     sync::{
         atomic,
         Mutex,
+        TryLockError,
     },
 };
 
@@ -13,12 +14,74 @@ use crate::{
 
 struct Bucket<J> {
     slot: Mutex<BucketSlot<J>>,
-    jobs_count: atomic::AtomicUsize,
+    touch_tag: TouchTag,
     taken_by: atomic::AtomicUsize,
 }
 
 struct BucketSlot<J> {
     jobs_queue: Vec<J>,
+}
+
+impl<J> Bucket<J> {
+    fn notify_waiting_worker(&self, threads: &[thread::Thread]) {
+        let taken_by = self.taken_by.load(atomic::Ordering::SeqCst);
+        if taken_by > 0 {
+            let worker_index = taken_by - 1;
+            threads[worker_index].unpark();
+        }
+    }
+}
+
+struct TouchTag {
+    tag: atomic::AtomicU64,
+}
+
+impl Default for TouchTag {
+    fn default() -> TouchTag {
+        TouchTag {
+            tag: atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+impl TouchTag {
+    const JOBS_COUNT_MASK: u64 = u32::MAX as u64;
+    const COLLISION_MASK: u64 = Self::JOBS_COUNT_MASK + 1;
+
+    fn load(&self) -> u64 {
+        self.tag.load(atomic::Ordering::SeqCst)
+    }
+
+    fn try_set(&self, prev_tag: u64, new_tag: u64) -> bool {
+        self.tag
+            .compare_exchange(
+                prev_tag,
+                new_tag,
+                atomic::Ordering::Acquire,
+                atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+    }
+
+    fn inc_jobs_count(&self) {
+        self.tag.fetch_add(1, atomic::Ordering::SeqCst);
+    }
+
+    fn mark_collision(&self) {
+        self.tag.fetch_or(Self::COLLISION_MASK, atomic::Ordering::SeqCst);
+    }
+
+    fn decompose(tag: u64) -> (bool, usize) {
+        (tag & Self::COLLISION_MASK != 0, (tag & Self::JOBS_COUNT_MASK) as usize)
+    }
+
+    fn compose(collision_flag: bool, jobs_count: usize) -> u64 {
+        let mut tag = jobs_count as u64;
+        if collision_flag {
+            tag |= Self::COLLISION_MASK;
+        }
+        tag
+    }
 }
 
 impl<J> Default for Bucket<J> {
@@ -27,7 +90,7 @@ impl<J> Default for Bucket<J> {
             slot: Mutex::new(BucketSlot {
                 jobs_queue: Vec::new(),
             }),
-            jobs_count: atomic::AtomicUsize::new(0),
+            touch_tag: TouchTag::default(),
             taken_by: atomic::AtomicUsize::new(0),
         }
     }
@@ -60,27 +123,32 @@ impl<J> Inner<J> {
     }
 
     pub fn spawn(&self, job: J, threads: &[thread::Thread]) -> Result<(), SpawnError> {
-        if self.is_terminated() {
-            return Err(SpawnError::ThreadPoolGone);
-        }
+        loop {
+            if self.is_terminated() {
+                return Err(SpawnError::ThreadPoolGone);
+            }
 
-        let bucket_index = self.spawn_index_counter.fetch_add(1, atomic::Ordering::Relaxed) % self.buckets.len();
-        let bucket = &self.buckets[bucket_index];
-        let mut slot = bucket.slot.lock()
-            .map_err(|_| SpawnError::BucketMutexPoisoned)?;
-        slot.jobs_queue.push(job);
-        bucket.jobs_count.fetch_add(1, atomic::Ordering::Relaxed);
-        let taken_by = bucket.taken_by.load(atomic::Ordering::SeqCst);
-        if taken_by > 0 {
-            let worker_index = taken_by - 1;
-            threads[worker_index].unpark();
+            let bucket_index = self.spawn_index_counter.fetch_add(1, atomic::Ordering::Relaxed) % self.buckets.len();
+            let bucket = &self.buckets[bucket_index];
+            match bucket.slot.try_lock() {
+                Ok(mut slot) => {
+                    slot.jobs_queue.push(job);
+                    bucket.touch_tag.inc_jobs_count();
+                    bucket.notify_waiting_worker(threads);
+                    return Ok(());
+                },
+                Err(TryLockError::WouldBlock) => {
+                    bucket.touch_tag.mark_collision();
+                    bucket.notify_waiting_worker(threads);
+                },
+                Err(TryLockError::Poisoned(..)) =>
+                    return Err(SpawnError::BucketMutexPoisoned),
+            }
         }
-
-        Ok(())
     }
 
     pub fn acquire_job(&self, worker_index: usize) -> Option<J> {
-        loop {
+        'outer: loop {
             if self.is_terminated() {
                 return None;
             }
@@ -96,10 +164,32 @@ impl<J> Inner<J> {
                 );
             if let Err(..) = taken_by_result {
                 // bucket is already taken, proceed to the next one
-                continue;
+                continue 'outer;
             }
 
-            while bucket.jobs_count.load(atomic::Ordering::SeqCst) == 0 {
+            loop {
+                let old_touch_tag = bucket.touch_tag.load();
+                let (collision_flag, jobs_count) = TouchTag::decompose(old_touch_tag);
+                if jobs_count > 0 {
+                    // got a job in `jobs_queue`, try to grab it
+                    let new_touch_tag = TouchTag::compose(false, jobs_count - 1);
+                    if !bucket.touch_tag.try_set(old_touch_tag, new_touch_tag) {
+                        continue;
+                    }
+                    break;
+                }
+                if collision_flag {
+                    // `spawn` collision occurred and no jobs in `jobs_queue`, skip this bucket
+                    let new_touch_tag = TouchTag::compose(false, 0);
+                    if !bucket.touch_tag.try_set(old_touch_tag, new_touch_tag) {
+                        continue;
+                    }
+
+                    bucket.taken_by.store(0, atomic::Ordering::SeqCst);
+                    continue 'outer;
+                }
+
+                // nothing interesting, wait for something to occur
                 thread::park();
                 if self.is_terminated() {
                     return None;
@@ -108,7 +198,6 @@ impl<J> Inner<J> {
 
             let mut slot = bucket.slot.lock().ok()?;
             let job = slot.jobs_queue.pop().unwrap();
-            bucket.jobs_count.fetch_sub(1, atomic::Ordering::SeqCst);
             bucket.taken_by.store(0, atomic::Ordering::SeqCst);
             return Some(job)
         }

@@ -174,7 +174,7 @@ fn async_job() {
 #[test]
 fn small_stress_job() {
     const JOBS_COUNT: usize = 256;
-    const SUBJOBS_COUNT: usize = 256;
+    const SUBJOBS_COUNT: usize = 1024;
 
     let shared_counter = Arc::new(atomic::AtomicUsize::new(0));
 
