@@ -77,23 +77,30 @@ impl<J> Inner<J> {
     }
 
     pub fn acquire_job(&self) -> Option<J> {
-        if self.is_terminated() {
-            return None;
-        }
-
-        let bucket_index = self.await_index_counter.fetch_add(1, atomic::Ordering::Relaxed) % self.buckets.len();
-        let bucket = &self.buckets[bucket_index];
-        let mut slot = bucket.slot.lock().ok()?;
-        assert!(!slot.pending_await, "slot pending await detected while acquire_job: bucket_index = {bucket_index}, #buckets = {}", self.buckets.len());
-        while slot.jobs_queue.is_empty() {
-            slot.pending_await = true;
-            slot = bucket.condvar.wait(slot).ok()?;
-            slot.pending_await = false;
+        loop {
             if self.is_terminated() {
                 return None;
             }
+
+            let bucket_index = self.await_index_counter.fetch_add(1, atomic::Ordering::Relaxed) % self.buckets.len();
+            let bucket = &self.buckets[bucket_index];
+            let mut slot = bucket.slot.lock().ok()?;
+            if slot.pending_await {
+                continue;
+            }
+
+            loop {
+                if let Some(job) = slot.jobs_queue.pop() {
+                    return Some(job);
+                }
+                slot.pending_await = true;
+                slot = bucket.condvar.wait(slot).ok()?;
+                slot.pending_await = false;
+                if self.is_terminated() {
+                    return None;
+                }
+            }
         }
-        slot.jobs_queue.pop()
     }
 
     fn is_terminated(&self) -> bool {
