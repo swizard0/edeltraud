@@ -10,7 +10,6 @@ use std::{
         Poll,
     },
     sync::{
-        atomic,
         Arc,
     },
     marker::{
@@ -74,48 +73,19 @@ impl Builder {
             return Err(BuildError::ZeroWorkerThreadsCount);
         }
 
-        let sched_workers: Vec<_> = (0 .. worker_threads)
-            .map(|_| crossbeam::deque::Worker::new_lifo())
-            .collect();
-        let mut sched_stealers = Vec::with_capacity(worker_threads);
-        for worker_index in 0 .. worker_threads {
-            let stealers: Vec<_> = (0 .. worker_threads)
-                .flat_map(|stealer_index| if worker_index == stealer_index {
-                    None
-                } else {
-                    Some(sched_workers[stealer_index].stealer())
-                })
-                .collect();
-            sched_stealers.push(stealers);
-        }
-
         let inner: Arc<inner::Inner<J>> =
-            Arc::new(inner::Inner::new(worker_threads));
+            Arc::new(inner::Inner::new(worker_threads)?);
 
         let mut maybe_error = Ok(());
         let mut workers = Vec::with_capacity(worker_threads);
-        let sched_iter = sched_workers.into_iter()
-            .zip(sched_stealers.into_iter())
-            .enumerate();
-        for (worker_index, (sched_worker, sched_stealers)) in sched_iter {
+        for worker_index in 0 .. worker_threads {
             let inner = inner.clone();
             let maybe_join_handle = thread::Builder::new()
                 .name(format!("edeltraud worker {}", worker_index))
                 .spawn(move || {
-                    let _drop_bomb = DropBomp { is_terminated: &inner.is_terminated, };
-                    let worker_thread_pool = LocalEdeltraud { sched_worker: &sched_worker };
-                    while let Some(job) = inner.acquire_job(worker_index, &sched_worker, &sched_stealers) {
+                    let worker_thread_pool = LocalEdeltraud { inner_ref: &inner, };
+                    while let Some(job) = inner.acquire_job() {
                         job.run(&worker_thread_pool);
-                    }
-
-                    struct DropBomp<'a> {
-                        is_terminated: &'a atomic::AtomicBool,
-                    }
-
-                    impl<'a> Drop for DropBomp<'a> {
-                        fn drop(&mut self) {
-                            self.is_terminated.store(true, atomic::Ordering::SeqCst);
-                        }
                     }
                 })
                 .map_err(BuildError::WorkerSpawn);
@@ -140,9 +110,8 @@ impl<J> Drop for Edeltraud<J> where J: Job {
     fn drop(&mut self) {
         if let Some(workers_arc) = self.workers.take() {
             if let Ok(workers) = Arc::try_unwrap(workers_arc) {
-                self.inner.is_terminated.store(true, atomic::Ordering::SeqCst);
+                self.inner.force_terminate();
                 for join_handle in workers {
-                    join_handle.thread().unpark();
                     join_handle.join().ok();
                 }
             }
@@ -153,12 +122,14 @@ impl<J> Drop for Edeltraud<J> where J: Job {
 #[derive(Debug)]
 pub enum BuildError {
     ZeroWorkerThreadsCount,
+    TooBigWorkerThreadsCount,
     WorkerSpawn(io::Error),
 }
 
 #[derive(Debug)]
 pub enum SpawnError {
     ThreadPoolGone,
+    BucketMutexPoisoned,
 }
 
 pub trait ThreadPool<J> {
@@ -209,7 +180,7 @@ impl<J> Clone for Edeltraud<J> where J: Job {
 
 impl<J> ThreadPool<J> for Edeltraud<J> where J: Job {
     fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        self.inner.spawn(job, self.workers.as_ref().map(|v| &***v))
+        self.inner.spawn(job)
     }
 }
 
@@ -250,13 +221,18 @@ where P: ThreadPool<J>,
 }
 
 struct LocalEdeltraud<'a, J> {
-    sched_worker: &'a crossbeam::deque::Worker<J>,
+    inner_ref: &'a inner::Inner<J>,
+}
+
+impl<'a, J> Drop for LocalEdeltraud<'a, J> {
+    fn drop(&mut self) {
+        self.inner_ref.force_terminate();
+    }
 }
 
 impl<'a, J> ThreadPool<J> for LocalEdeltraud<'a, J> where J: Job {
     fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        self.sched_worker.push(job);
-        Ok(())
+        self.inner_ref.spawn(job)
     }
 }
 
