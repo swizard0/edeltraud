@@ -78,6 +78,8 @@ pub struct Counters {
 pub struct Stats {
     pub acquire_job_time: Duration,
     pub acquire_job_count: usize,
+    pub acquire_job_backoff_time: Duration,
+    pub acquire_job_backoff_count: usize,
     pub acquire_job_thread_park_time: Duration,
     pub acquire_job_thread_park_count: usize,
     pub acquire_job_mutex_lock_time: Duration,

@@ -11,6 +11,10 @@ use std::{
     },
 };
 
+use crossbeam_utils::{
+    Backoff,
+};
+
 use crate::{
     Stats,
     Counters,
@@ -185,6 +189,7 @@ impl<J> Inner<J> {
                 continue 'outer;
             }
 
+            let backoff = Backoff::new();
             loop {
                 let old_touch_tag = bucket.touch_tag.load();
                 let (collision_flag, jobs_count) = TouchTag::decompose(old_touch_tag);
@@ -209,9 +214,16 @@ impl<J> Inner<J> {
 
                 // nothing interesting, wait for something to occur
                 let now = Instant::now();
-                thread::park();
-                stats.acquire_job_thread_park_time += now.elapsed();
-                stats.acquire_job_thread_park_count += 1;
+                if backoff.is_completed() {
+                    thread::park();
+                    stats.acquire_job_thread_park_time += now.elapsed();
+                    stats.acquire_job_thread_park_count += 1;
+                } else {
+                    backoff.snooze();
+                    stats.acquire_job_backoff_time += now.elapsed();
+                    stats.acquire_job_backoff_count += 1;
+                }
+
                 if self.is_terminated() {
                     return None;
                 }
