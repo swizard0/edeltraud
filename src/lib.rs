@@ -49,6 +49,12 @@ pub struct Edeltraud<J> where J: Job {
     inner: Arc<inner::Inner<J>>,
     threads: Arc<Vec<thread::Thread>>,
     workers: Option<Arc<Vec<thread::JoinHandle<()>>>>,
+    shutdown: Arc<Shutdown>,
+}
+
+struct Shutdown {
+    mutex: Mutex<bool>,
+    condvar: Condvar,
 }
 
 pub struct Builder {
@@ -150,6 +156,10 @@ impl Builder {
             inner,
             threads,
             workers: Some(Arc::new(workers)),
+            shutdown: Arc::new(Shutdown {
+                mutex: Mutex::new(false),
+                condvar: Condvar::new(),
+            }),
         };
 
         maybe_error?;
@@ -159,8 +169,19 @@ impl Builder {
 }
 
 impl<J> Edeltraud<J> where J: Job {
-    pub fn schedule_shutdown(&self) {
+    pub fn shutdown(self) {
         self.inner.force_terminate(&self.threads);
+        if let Ok(mut lock) = self.shutdown.mutex.lock() {
+            while !*lock {
+                let Ok(next_lock) = self.shutdown.condvar.wait(lock) else {
+                    log::error!("failed to wait on shutdown condvar, terminating immediately");
+                    break;
+                };
+                lock = next_lock;
+            }
+        } else {
+            log::error!("failed to lock shutdown mutex, terminating immediately");
+        }
     }
 }
 
@@ -173,7 +194,12 @@ impl<J> Drop for Edeltraud<J> where J: Job {
                 for join_handle in workers {
                     join_handle.join().ok();
                 }
-
+                if let Ok(mut lock) = self.shutdown.mutex.lock() {
+                    *lock = true;
+                    self.shutdown.condvar.notify_all();
+                } else {
+                    log::error!("failed to lock shutdown mutex on drop");
+                }
             }
         }
     }
@@ -235,6 +261,7 @@ impl<J> Clone for Edeltraud<J> where J: Job {
             inner: self.inner.clone(),
             threads: self.threads.clone(),
             workers: self.workers.clone(),
+            shutdown: self.shutdown.clone(),
         }
     }
 }
