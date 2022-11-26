@@ -10,6 +10,7 @@ use std::{
         Poll,
     },
     sync::{
+        atomic,
         Arc,
         Mutex,
         Condvar,
@@ -68,10 +69,22 @@ impl Default for Builder {
 }
 
 #[derive(Debug, Default)]
-struct Timings {
-    acquire_job: Duration,
-    acquire_job_thread_park: Duration,
-    job_run: Duration,
+pub struct Counters {
+    pub spawn_mutex_lock_success: atomic::AtomicUsize,
+    pub spawn_mutex_lock_fail: atomic::AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+pub struct Stats {
+    pub acquire_job_time: Duration,
+    pub acquire_job_count: usize,
+    pub acquire_job_thread_park_time: Duration,
+    pub acquire_job_thread_park_count: usize,
+    pub acquire_job_mutex_lock_time: Duration,
+    pub acquire_job_mutex_lock_count: usize,
+    pub job_run_time: Duration,
+    pub job_run_count: usize,
+    pub counters: Arc<Counters>,
 }
 
 impl Builder {
@@ -93,8 +106,9 @@ impl Builder {
             return Err(BuildError::ZeroWorkerThreadsCount);
         }
 
+        let counters = Arc::new(Counters::default());
         let inner: Arc<inner::Inner<J>> =
-            Arc::new(inner::Inner::new(worker_threads)?);
+            Arc::new(inner::Inner::new(worker_threads, counters.clone())?);
 
         let mut maybe_error = Ok(());
         let mut workers = Vec::with_capacity(worker_threads);
@@ -103,6 +117,7 @@ impl Builder {
         for worker_index in 0 .. worker_threads {
             let inner = inner.clone();
             let workers_sync = workers_sync.clone();
+            let counters = counters.clone();
             let maybe_join_handle = thread::Builder::new()
                 .name(format!("edeltraud worker {}", worker_index))
                 .spawn(move || {
@@ -125,12 +140,13 @@ impl Builder {
                     let mut worker_thread_pool = LocalEdeltraud {
                         inner_ref: &inner,
                         threads_ref: &threads,
-                        timings: Timings::default(),
+                        stats: Stats { counters, ..Default::default() },
                     };
-                    while let Some(job) = inner.acquire_job(worker_index, &mut worker_thread_pool.timings) {
+                    while let Some(job) = inner.acquire_job(worker_index, &mut worker_thread_pool.stats) {
                         let now = Instant::now();
                         job.run(&worker_thread_pool);
-                        worker_thread_pool.timings.job_run += now.elapsed();
+                        worker_thread_pool.stats.job_run_time += now.elapsed();
+                        worker_thread_pool.stats.job_run_count += 1;
                     }
                 })
                 .map_err(BuildError::WorkerSpawn);
@@ -169,15 +185,26 @@ impl Builder {
 }
 
 impl<J> Edeltraud<J> where J: Job {
-    pub fn shutdown(self) {
+    pub fn shutdown_timeout(self, timeout: Duration) {
         self.inner.force_terminate(&self.threads);
         if let Ok(mut lock) = self.shutdown.mutex.lock() {
+            let mut current_timeout = timeout;
+            let now = Instant::now();
             while !*lock {
-                let Ok(next_lock) = self.shutdown.condvar.wait(lock) else {
-                    log::error!("failed to wait on shutdown condvar, terminating immediately");
-                    break;
-                };
-                lock = next_lock;
+                match self.shutdown.condvar.wait_timeout(lock, current_timeout) {
+                    Ok((next_lock, wait_timeout_result)) => {
+                        lock = next_lock;
+                        if wait_timeout_result.timed_out() {
+                            log::info!("shutdown wait timed out");
+                            break;
+                        }
+                        current_timeout -= now.elapsed();
+                    },
+                    Err(..) => {
+                        log::error!("failed to wait on shutdown condvar, terminating immediately");
+                        break;
+                    },
+                }
             }
         } else {
             log::error!("failed to lock shutdown mutex, terminating immediately");
@@ -311,13 +338,13 @@ where P: ThreadPool<J>,
 struct LocalEdeltraud<'a, J> {
     inner_ref: &'a inner::Inner<J>,
     threads_ref: &'a [thread::Thread],
-    timings: Timings,
+    stats: Stats,
 }
 
 impl<'a, J> Drop for LocalEdeltraud<'a, J> {
     fn drop(&mut self) {
         self.inner_ref.force_terminate(self.threads_ref);
-        log::info!("LocalEdeltraud::drop on {:?}, timings: {:?}", thread::current(), self.timings);
+        log::info!("LocalEdeltraud::drop on {:?}, stats: {:?}", thread::current(), self.stats);
     }
 }
 

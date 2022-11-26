@@ -2,6 +2,7 @@ use std::{
     thread,
     sync::{
         atomic,
+        Arc,
         Mutex,
         TryLockError,
     },
@@ -11,7 +12,8 @@ use std::{
 };
 
 use crate::{
-    Timings,
+    Stats,
+    Counters,
     SpawnError,
     BuildError,
 };
@@ -105,10 +107,11 @@ pub struct Inner<J> {
     spawn_index_counter: atomic::AtomicUsize,
     await_index_counter: atomic::AtomicUsize,
     is_terminated: atomic::AtomicBool,
+    counters: Arc<Counters>,
 }
 
 impl<J> Inner<J> {
-    pub(super) fn new(workers_count: usize) -> Result<Self, BuildError> {
+    pub(super) fn new(workers_count: usize, counters: Arc<Counters>) -> Result<Self, BuildError> {
         Ok(Self {
             buckets: (0 .. workers_count)
                 .map(|_| Bucket::default())
@@ -116,6 +119,7 @@ impl<J> Inner<J> {
             spawn_index_counter: atomic::AtomicUsize::new(0),
             await_index_counter: atomic::AtomicUsize::new(0),
             is_terminated: atomic::AtomicBool::new(false),
+            counters,
         })
     }
 
@@ -139,11 +143,13 @@ impl<J> Inner<J> {
                     slot.jobs_queue.push(job);
                     bucket.touch_tag.inc_jobs_count();
                     bucket.notify_waiting_worker(threads);
+                    self.counters.spawn_mutex_lock_success.fetch_add(1, atomic::Ordering::Relaxed);
                     return Ok(());
                 },
                 Err(TryLockError::WouldBlock) => {
                     bucket.touch_tag.mark_collision();
                     bucket.notify_waiting_worker(threads);
+                    self.counters.spawn_mutex_lock_fail.fetch_add(1, atomic::Ordering::Relaxed);
                 },
                 Err(TryLockError::Poisoned(..)) =>
                     return Err(SpawnError::BucketMutexPoisoned),
@@ -151,14 +157,15 @@ impl<J> Inner<J> {
         }
     }
 
-    pub(super) fn acquire_job(&self, worker_index: usize, timings: &mut Timings) -> Option<J> {
+    pub(super) fn acquire_job(&self, worker_index: usize, stats: &mut Stats) -> Option<J> {
         let now = Instant::now();
-        let maybe_job = self.actually_acquire_job(worker_index, timings);
-        timings.acquire_job += now.elapsed();
+        let maybe_job = self.actually_acquire_job(worker_index, stats);
+        stats.acquire_job_time += now.elapsed();
+        stats.acquire_job_count += 1;
         maybe_job
     }
 
-    fn actually_acquire_job(&self, worker_index: usize, timings: &mut Timings) -> Option<J> {
+    fn actually_acquire_job(&self, worker_index: usize, stats: &mut Stats) -> Option<J> {
         'outer: loop {
             if self.is_terminated() {
                 return None;
@@ -203,13 +210,17 @@ impl<J> Inner<J> {
                 // nothing interesting, wait for something to occur
                 let now = Instant::now();
                 thread::park();
-                timings.acquire_job_thread_park += now.elapsed();
+                stats.acquire_job_thread_park_time += now.elapsed();
+                stats.acquire_job_thread_park_count += 1;
                 if self.is_terminated() {
                     return None;
                 }
             }
 
+            let now = Instant::now();
             let mut slot = bucket.slot.lock().ok()?;
+            stats.acquire_job_mutex_lock_time += now.elapsed();
+            stats.acquire_job_mutex_lock_count += 1;
             let job = slot.jobs_queue.pop().unwrap();
             bucket.taken_by.store(0, atomic::Ordering::SeqCst);
             return Some(job)
