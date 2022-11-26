@@ -158,6 +158,12 @@ impl Builder {
     }
 }
 
+impl<J> Edeltraud<J> where J: Job {
+    pub fn schedule_shutdown(&self) {
+        self.inner.force_terminate(&self.threads);
+    }
+}
+
 impl<J> Drop for Edeltraud<J> where J: Job {
     fn drop(&mut self) {
         if let Some(workers_arc) = self.workers.take() {
