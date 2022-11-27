@@ -56,7 +56,7 @@ impl Default for TouchTag {
 
 impl TouchTag {
     const JOBS_COUNT_MASK: u64 = u32::MAX as u64;
-    const COLLISION_MASK: u64 = Self::JOBS_COUNT_MASK + 1;
+    const COLLISION_BIT: u64 = Self::JOBS_COUNT_MASK + 1;
 
     fn load(&self) -> u64 {
         self.tag.load(atomic::Ordering::SeqCst)
@@ -78,17 +78,17 @@ impl TouchTag {
     }
 
     fn mark_collision(&self) {
-        self.tag.fetch_or(Self::COLLISION_MASK, atomic::Ordering::SeqCst);
+        self.tag.fetch_or(Self::COLLISION_BIT, atomic::Ordering::SeqCst);
     }
 
     fn decompose(tag: u64) -> (bool, usize) {
-        (tag & Self::COLLISION_MASK != 0, (tag & Self::JOBS_COUNT_MASK) as usize)
+        (tag & Self::COLLISION_BIT != 0, (tag & Self::JOBS_COUNT_MASK) as usize)
     }
 
     fn compose(collision_flag: bool, jobs_count: usize) -> u64 {
         let mut tag = jobs_count as u64;
         if collision_flag {
-            tag |= Self::COLLISION_MASK;
+            tag |= Self::COLLISION_BIT;
         }
         tag
     }
