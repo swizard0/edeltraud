@@ -64,7 +64,7 @@ impl TouchTag {
 
     fn try_set(&self, prev_tag: u64, new_tag: u64) -> bool {
         self.tag
-            .compare_exchange(
+            .compare_exchange_weak(
                 prev_tag,
                 new_tag,
                 atomic::Ordering::Acquire,
