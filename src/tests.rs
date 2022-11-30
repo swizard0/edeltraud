@@ -35,10 +35,11 @@ impl Computation for SleepJob {
 
 #[test]
 fn basic() {
-    let pool: Edeltraud<AsyncJob<SleepJob>> = Builder::new()
+    let edeltraud: Edeltraud<AsyncJob<SleepJob>> = Builder::new()
         .worker_threads(4)
         .build()
         .unwrap();
+    let pool = edeltraud.handle();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -88,10 +89,11 @@ impl Job for SleepJobRec {
 
 #[test]
 fn recursive_spawn() {
-    let pool: Edeltraud<SleepJobRec> = Builder::new()
+    let edeltraud: Edeltraud<SleepJobRec> = Builder::new()
         .worker_threads(5)
         .build()
         .unwrap();
+    let pool = edeltraud.handle();
     let now = Instant::now();
 
     let (sync_tx, sync_rx) = mpsc::channel();
@@ -120,10 +122,11 @@ impl Job for WrappedSleepJob {
 
 #[test]
 fn multilayer_job() {
-    let pool: Edeltraud<WrappedSleepJob> = Builder::new()
+    let edeltraud: Edeltraud<WrappedSleepJob> = Builder::new()
         .worker_threads(4)
         .build()
         .unwrap();
+    let pool = edeltraud.handle();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -139,7 +142,7 @@ fn multilayer_job() {
     });
     let elapsed = now.elapsed().as_secs_f64();
     assert!(elapsed >= 0.4, "elapsed expected to be >= 0.4, but it is {elapsed:?}");
-    assert!(elapsed < 0.5, "elapsed expected to be < 0.5, but it is {elapsed:?}");
+    assert!(elapsed < 0.55, "elapsed expected to be < 0.55, but it is {elapsed:?}");
 }
 
 struct SleepJobValue(isize);
@@ -155,10 +158,11 @@ impl Computation for SleepJobValue {
 
 #[test]
 fn async_job() {
-    let pool: Edeltraud<AsyncJob<SleepJobValue>> = Builder::new()
+    let edeltraud: Edeltraud<AsyncJob<SleepJobValue>> = Builder::new()
         .worker_threads(4)
         .build()
         .unwrap();
+    let pool = edeltraud.handle();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -200,10 +204,11 @@ fn small_stress_job() {
         }
     }
 
-    let thread_pool: Edeltraud<StressJob> = Builder::new()
+    let edeltraud: Edeltraud<StressJob> = Builder::new()
         .worker_threads(4)
         .build()
         .unwrap();
+    let thread_pool = edeltraud.handle();
 
     for _ in 0 .. JOBS_COUNT {
         thread_pool.spawn(StressJob { shared_counter: shared_counter.clone(), allow_rec: true, })
