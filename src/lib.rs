@@ -224,9 +224,6 @@ impl<J> Edeltraud<J> where J: Job {
 impl<J> Drop for Edeltraud<J> where J: Job {
     fn drop(&mut self) {
         log::debug!("Edeltraud::drop() invoked");
-
-        println!(" ;; ACTUALLY dropping {:?} Edeltraud()", self as *const _);
-
         self.inner.force_terminate(&self.threads);
         for join_handle in self.workers.drain(..) {
             join_handle.join().ok();
