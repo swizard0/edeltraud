@@ -3,16 +3,16 @@ use std::{
     sync::{
         atomic,
         Arc,
-        Mutex,
-        TryLockError,
     },
     time::{
         Instant,
     },
 };
 
-use crossbeam_utils::{
-    Backoff,
+use crossbeam::{
+    utils::{
+        Backoff,
+    },
 };
 
 use crate::{
@@ -23,23 +23,12 @@ use crate::{
 };
 
 struct Bucket<J> {
-    slot: Mutex<BucketSlot<J>>,
+    slot: BucketSlot<J>,
     touch_tag: TouchTag,
-    taken_by: atomic::AtomicUsize,
 }
 
 struct BucketSlot<J> {
-    jobs_queue: Vec<J>,
-}
-
-impl<J> Bucket<J> {
-    fn notify_waiting_worker(&self, threads: &[thread::Thread]) {
-        let taken_by = self.taken_by.load(atomic::Ordering::SeqCst);
-        if taken_by > 0 {
-            let worker_index = taken_by - 1;
-            threads[worker_index].unpark();
-        }
-    }
+    jobs_queue: crossbeam::queue::SegQueue<J>,
 }
 
 struct TouchTag {
@@ -54,15 +43,21 @@ impl Default for TouchTag {
     }
 }
 
+#[derive(Debug)]
+struct TouchTagDecoded {
+    taken_by: usize,
+    jobs_count: usize,
+}
+
 impl TouchTag {
     const JOBS_COUNT_MASK: u64 = u32::MAX as u64;
-    const COLLISION_BIT: u64 = Self::JOBS_COUNT_MASK + 1;
+    const TAKEN_BY_MASK: u64 = !Self::JOBS_COUNT_MASK;
 
     fn load(&self) -> u64 {
-        self.tag.load(atomic::Ordering::SeqCst)
+        self.tag.load(atomic::Ordering::Relaxed)
     }
 
-    fn try_set(&self, prev_tag: u64, new_tag: u64) -> bool {
+    fn try_set(&self, prev_tag: u64, new_tag: u64) -> Result<(), u64> {
         self.tag
             .compare_exchange_weak(
                 prev_tag,
@@ -70,26 +65,19 @@ impl TouchTag {
                 atomic::Ordering::Acquire,
                 atomic::Ordering::Relaxed,
             )
-            .is_ok()
+            .map(|_| ())
     }
 
-    fn inc_jobs_count(&self) {
-        self.tag.fetch_add(1, atomic::Ordering::SeqCst);
-    }
-
-    fn mark_collision(&self) {
-        self.tag.fetch_or(Self::COLLISION_BIT, atomic::Ordering::SeqCst);
-    }
-
-    fn decompose(tag: u64) -> (bool, usize) {
-        (tag & Self::COLLISION_BIT != 0, (tag & Self::JOBS_COUNT_MASK) as usize)
-    }
-
-    fn compose(collision_flag: bool, jobs_count: usize) -> u64 {
-        let mut tag = jobs_count as u64;
-        if collision_flag {
-            tag |= Self::COLLISION_BIT;
+    fn decompose(tag: u64) -> TouchTagDecoded {
+        TouchTagDecoded {
+            taken_by: ((tag & Self::TAKEN_BY_MASK) >> 32) as usize,
+            jobs_count: (tag & Self::JOBS_COUNT_MASK) as usize,
         }
+    }
+
+    fn compose(decoded: TouchTagDecoded) -> u64 {
+        let mut tag = (decoded.taken_by as u64) << 32;
+        tag |= decoded.jobs_count as u64;
         tag
     }
 }
@@ -97,11 +85,10 @@ impl TouchTag {
 impl<J> Default for Bucket<J> {
     fn default() -> Self {
         Self {
-            slot: Mutex::new(BucketSlot {
-                jobs_queue: Vec::new(),
-            }),
+            slot: BucketSlot {
+                jobs_queue: crossbeam::queue::SegQueue::new(),
+            },
             touch_tag: TouchTag::default(),
-            taken_by: atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -135,30 +122,37 @@ impl<J> Inner<J> {
     }
 
     pub(super) fn spawn(&self, job: J, threads: &[thread::Thread]) -> Result<(), SpawnError> {
+        let bucket_index = self.spawn_index_counter.fetch_add(1, atomic::Ordering::Relaxed) % self.buckets.len();
+        let bucket = &self.buckets[bucket_index];
+
+        let mut prev_tag = bucket.touch_tag.load();
         loop {
             if self.is_terminated() {
                 return Err(SpawnError::ThreadPoolGone);
             }
 
-            let bucket_index = self.spawn_index_counter.fetch_add(1, atomic::Ordering::Relaxed) % self.buckets.len();
-            let bucket = &self.buckets[bucket_index];
-            match bucket.slot.try_lock() {
-                Ok(mut slot) => {
-                    slot.jobs_queue.push(job);
-                    bucket.touch_tag.inc_jobs_count();
-                    bucket.notify_waiting_worker(threads);
-                    self.counters.spawn_mutex_lock_success.fetch_add(1, atomic::Ordering::Relaxed);
-                    return Ok(());
-                },
-                Err(TryLockError::WouldBlock) => {
-                    bucket.touch_tag.mark_collision();
-                    bucket.notify_waiting_worker(threads);
-                    self.counters.spawn_mutex_lock_fail.fetch_add(1, atomic::Ordering::Relaxed);
-                },
-                Err(TryLockError::Poisoned(..)) =>
-                    return Err(SpawnError::BucketMutexPoisoned),
+            let decoded = TouchTag::decompose(prev_tag);
+            let new_tag = TouchTag::compose(TouchTagDecoded {
+                jobs_count: decoded.jobs_count + 1,
+                ..decoded
+            });
+            if let Err(changed_tag) = bucket.touch_tag.try_set(prev_tag, new_tag) {
+                prev_tag = changed_tag;
+                self.counters.spawn_touch_tag_collisions.fetch_add(1, atomic::Ordering::Relaxed);
+                continue;
             }
+            bucket.slot.jobs_queue.push(job);
+
+            // notify possibly parked worker
+            if decoded.taken_by > 0 {
+                let worker_index = decoded.taken_by - 1;
+                threads[worker_index].unpark();
+            }
+
+            break;
         }
+
+        Ok(())
     }
 
     pub(super) fn acquire_job(&self, worker_index: usize, stats: &mut Stats) -> Option<J> {
@@ -171,71 +165,90 @@ impl<J> Inner<J> {
 
     fn actually_acquire_job(&self, worker_index: usize, stats: &mut Stats) -> Option<J> {
         'outer: loop {
-            if self.is_terminated() {
-                return None;
-            }
-
             let bucket_index = self.await_index_counter.fetch_add(1, atomic::Ordering::Relaxed) % self.buckets.len();
             let bucket = &self.buckets[bucket_index];
-            let taken_by_result = bucket.taken_by
-                .compare_exchange(
-                    0,
-                    worker_index + 1,
-                    atomic::Ordering::Acquire,
-                    atomic::Ordering::Relaxed,
-                );
-            if let Err(..) = taken_by_result {
-                // bucket is already taken, proceed to the next one
-                continue 'outer;
-            }
 
-            let backoff = Backoff::new();
+            let mut prev_tag = bucket.touch_tag.load();
             loop {
-                let old_touch_tag = bucket.touch_tag.load();
-                let (collision_flag, jobs_count) = TouchTag::decompose(old_touch_tag);
-                if jobs_count > 0 {
-                    // got a job in `jobs_queue`, try to grab it
-                    let new_touch_tag = TouchTag::compose(false, jobs_count - 1);
-                    if !bucket.touch_tag.try_set(old_touch_tag, new_touch_tag) {
-                        continue;
-                    }
-                    break;
-                }
-                if collision_flag {
-                    // `spawn` collision occurred and no jobs in `jobs_queue`, skip this bucket
-                    let new_touch_tag = TouchTag::compose(false, 0);
-                    if !bucket.touch_tag.try_set(old_touch_tag, new_touch_tag) {
-                        continue;
-                    }
-
-                    bucket.taken_by.store(0, atomic::Ordering::SeqCst);
-                    continue 'outer;
-                }
-
-                // nothing interesting, wait for something to occur
-                let now = Instant::now();
-                if backoff.is_completed() {
-                    thread::park();
-                    stats.acquire_job_thread_park_time += now.elapsed();
-                    stats.acquire_job_thread_park_count += 1;
-                } else {
-                    backoff.snooze();
-                    stats.acquire_job_backoff_time += now.elapsed();
-                    stats.acquire_job_backoff_count += 1;
-                }
-
                 if self.is_terminated() {
                     return None;
                 }
+
+                let decoded = TouchTag::decompose(prev_tag);
+                if decoded.taken_by != 0 {
+                    // bucket is already taken, proceed to the next one
+                    continue 'outer;
+                }
+
+                if decoded.jobs_count == 0 {
+                    // empty bucket encountered, wait for a job to appear
+                    let new_tag = TouchTag::compose(TouchTagDecoded {
+                        taken_by: worker_index + 1,
+                        jobs_count: 0,
+                    });
+                    if let Err(changed_tag) = bucket.touch_tag.try_set(prev_tag, new_tag) {
+                        prev_tag = changed_tag;
+                        continue;
+                    }
+
+                    let backoff = Backoff::new();
+                    let mut prev_tag = bucket.touch_tag.load();
+                    loop {
+                        if self.is_terminated() {
+                            return None;
+                        }
+
+                        let decoded = TouchTag::decompose(prev_tag);
+                        if decoded.jobs_count == 0 {
+                            let now = Instant::now();
+                            if backoff.is_completed() {
+                                thread::park();
+                                stats.acquire_job_thread_park_time += now.elapsed();
+                                stats.acquire_job_thread_park_count += 1;
+                            } else {
+                                backoff.snooze();
+                                stats.acquire_job_backoff_time += now.elapsed();
+                                stats.acquire_job_backoff_count += 1;
+                            }
+                            prev_tag = bucket.touch_tag.load();
+                        } else {
+                            let new_tag = TouchTag::compose(TouchTagDecoded {
+                                taken_by: 0,
+                                jobs_count: decoded.jobs_count - 1,
+                            });
+                            if let Err(changed_tag) = bucket.touch_tag.try_set(prev_tag, new_tag) {
+                                prev_tag = changed_tag;
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                } else {
+                    // non-empty bucket, try to reserve a job
+                    let new_tag = TouchTag::compose(TouchTagDecoded {
+                        taken_by: 0,
+                        jobs_count: decoded.jobs_count - 1,
+                    });
+                    if let Err(changed_tag) = bucket.touch_tag.try_set(prev_tag, new_tag) {
+                        prev_tag = changed_tag;
+                        continue;
+                    }
+                }
+
+                break;
             }
 
+            // try to pop a job
             let now = Instant::now();
-            let mut slot = bucket.slot.lock().ok()?;
-            stats.acquire_job_mutex_lock_time += now.elapsed();
-            stats.acquire_job_mutex_lock_count += 1;
-            let job = slot.jobs_queue.pop().unwrap();
-            bucket.taken_by.store(0, atomic::Ordering::SeqCst);
-            return Some(job)
+            let backoff = Backoff::new();
+            loop {
+                if let Some(job) = bucket.slot.jobs_queue.pop() {
+                    stats.acquire_job_seg_queue_pop_time += now.elapsed();
+                    stats.acquire_job_seg_queue_pop_count += 1;
+                    return Some(job);
+                }
+                backoff.snooze();
+            }
         }
     }
 

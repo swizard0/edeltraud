@@ -70,8 +70,7 @@ impl Default for Builder {
 
 #[derive(Debug, Default)]
 pub struct Counters {
-    pub spawn_mutex_lock_success: atomic::AtomicUsize,
-    pub spawn_mutex_lock_fail: atomic::AtomicUsize,
+    pub spawn_touch_tag_collisions: atomic::AtomicUsize,
 }
 
 #[derive(Debug, Default)]
@@ -82,8 +81,8 @@ pub struct Stats {
     pub acquire_job_backoff_count: usize,
     pub acquire_job_thread_park_time: Duration,
     pub acquire_job_thread_park_count: usize,
-    pub acquire_job_mutex_lock_time: Duration,
-    pub acquire_job_mutex_lock_count: usize,
+    pub acquire_job_seg_queue_pop_time: Duration,
+    pub acquire_job_seg_queue_pop_count: usize,
     pub job_run_time: Duration,
     pub job_run_count: usize,
     pub counters: Arc<Counters>,
@@ -247,7 +246,6 @@ pub enum BuildError {
 #[derive(Debug)]
 pub enum SpawnError {
     ThreadPoolGone,
-    BucketMutexPoisoned,
 }
 
 pub trait ThreadPool<J> {
