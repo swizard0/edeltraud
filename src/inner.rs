@@ -152,6 +152,7 @@ impl<J> Inner<J> {
             break;
         }
 
+        self.counters.spawn_total_count.fetch_add(1, atomic::Ordering::Relaxed);
         Ok(())
     }
 

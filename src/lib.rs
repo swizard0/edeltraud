@@ -70,6 +70,7 @@ impl Default for Builder {
 
 #[derive(Debug, Default)]
 pub struct Counters {
+    pub spawn_total_count: atomic::AtomicUsize,
     pub spawn_touch_tag_collisions: atomic::AtomicUsize,
 }
 
