@@ -133,8 +133,8 @@ impl<J> Inner<J> {
 
             let decoded = TouchTag::decompose(prev_tag);
             let new_tag = TouchTag::compose(TouchTagDecoded {
+                taken_by: 0,
                 jobs_count: decoded.jobs_count + 1,
-                ..decoded
             });
             if let Err(changed_tag) = bucket.touch_tag.try_set(prev_tag, new_tag) {
                 prev_tag = changed_tag;
@@ -164,10 +164,11 @@ impl<J> Inner<J> {
     }
 
     fn actually_acquire_job(&self, worker_index: usize, stats: &mut Stats) -> Option<J> {
-        'outer: loop {
+        'pick_bucket: loop {
             let bucket_index = self.await_index_counter.fetch_add(1, atomic::Ordering::Relaxed) % self.buckets.len();
             let bucket = &self.buckets[bucket_index];
 
+            let backoff = Backoff::new();
             let mut prev_tag = bucket.touch_tag.load();
             loop {
                 if self.is_terminated() {
@@ -175,64 +176,54 @@ impl<J> Inner<J> {
                 }
 
                 let decoded = TouchTag::decompose(prev_tag);
-                if decoded.taken_by != 0 {
-                    // bucket is already taken, proceed to the next one
-                    continue 'outer;
-                }
 
                 if decoded.jobs_count == 0 {
-                    // empty bucket encountered, wait for a job to appear
-                    let new_tag = TouchTag::compose(TouchTagDecoded {
-                        taken_by: worker_index + 1,
-                        jobs_count: 0,
-                    });
-                    if let Err(changed_tag) = bucket.touch_tag.try_set(prev_tag, new_tag) {
-                        prev_tag = changed_tag;
+                    // empty bucket encountered, have to wait for a job to appear
+
+                    let now = Instant::now();
+                    if !backoff.is_completed() {
+                        // spin a little
+                        backoff.snooze();
+                        stats.acquire_job_backoff_time += now.elapsed();
+                        stats.acquire_job_backoff_count += 1;
+                        prev_tag = bucket.touch_tag.load();
                         continue;
                     }
 
-                    let backoff = Backoff::new();
-                    let mut prev_tag = bucket.touch_tag.load();
-                    loop {
-                        if self.is_terminated() {
-                            return None;
-                        }
-
-                        let decoded = TouchTag::decompose(prev_tag);
-                        if decoded.jobs_count == 0 {
-                            let now = Instant::now();
-                            if backoff.is_completed() {
-                                thread::park();
-                                stats.acquire_job_thread_park_time += now.elapsed();
-                                stats.acquire_job_thread_park_count += 1;
-                            } else {
-                                backoff.snooze();
-                                stats.acquire_job_backoff_time += now.elapsed();
-                                stats.acquire_job_backoff_count += 1;
-                            }
-                            prev_tag = bucket.touch_tag.load();
-                        } else {
+                    // park the worker if there is no job for a long time
+                    if decoded.taken_by != worker_index + 1 {
+                        if decoded.taken_by == 0 {
+                            // try to acquire parking lot on this bucket
                             let new_tag = TouchTag::compose(TouchTagDecoded {
-                                taken_by: 0,
-                                jobs_count: decoded.jobs_count - 1,
+                                taken_by: worker_index + 1,
+                                jobs_count: 0,
                             });
                             if let Err(changed_tag) = bucket.touch_tag.try_set(prev_tag, new_tag) {
                                 prev_tag = changed_tag;
                                 continue;
                             }
-                            break;
+                        } else {
+                            // there is another thread parked on this bucket, proceed to the next one
+                            stats.acquire_job_taken_by_collisions += 1;
+                            continue 'pick_bucket;
                         }
                     }
-                } else {
-                    // non-empty bucket, try to reserve a job
-                    let new_tag = TouchTag::compose(TouchTagDecoded {
-                        taken_by: 0,
-                        jobs_count: decoded.jobs_count - 1,
-                    });
-                    if let Err(changed_tag) = bucket.touch_tag.try_set(prev_tag, new_tag) {
-                        prev_tag = changed_tag;
-                        continue;
-                    }
+
+                    thread::park();
+                    stats.acquire_job_thread_park_time += now.elapsed();
+                    stats.acquire_job_thread_park_count += 1;
+                    prev_tag = bucket.touch_tag.load();
+                    continue;
+                }
+
+                // non-empty bucket, try to reserve a job
+                let new_tag = TouchTag::compose(TouchTagDecoded {
+                    taken_by: 0,
+                    jobs_count: decoded.jobs_count - 1,
+                });
+                if let Err(changed_tag) = bucket.touch_tag.try_set(prev_tag, new_tag) {
+                    prev_tag = changed_tag;
+                    continue;
                 }
 
                 break;
@@ -240,7 +231,7 @@ impl<J> Inner<J> {
 
             // try to pop a job
             let now = Instant::now();
-            let backoff = Backoff::new();
+            backoff.reset();
             loop {
                 if let Some(job) = bucket.slot.jobs_queue.pop() {
                     stats.acquire_job_seg_queue_pop_time += now.elapsed();

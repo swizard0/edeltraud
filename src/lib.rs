@@ -83,6 +83,7 @@ pub struct Stats {
     pub acquire_job_thread_park_count: usize,
     pub acquire_job_seg_queue_pop_time: Duration,
     pub acquire_job_seg_queue_pop_count: usize,
+    pub acquire_job_taken_by_collisions: usize,
     pub job_run_time: Duration,
     pub job_run_count: usize,
     pub counters: Arc<Counters>,
