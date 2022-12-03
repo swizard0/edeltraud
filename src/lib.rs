@@ -46,6 +46,10 @@ pub trait Computation: Sized + Send + 'static {
     fn run(self) -> Self::Output;
 }
 
+pub trait ThreadPool<J> {
+    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job;
+}
+
 pub struct Edeltraud<J> where J: Job {
     inner: Arc<inner::Inner<J>>,
     threads: Arc<Vec<thread::Thread>>,
@@ -248,10 +252,6 @@ pub enum BuildError {
 #[derive(Debug)]
 pub enum SpawnError {
     ThreadPoolGone,
-}
-
-pub trait ThreadPool<J> {
-    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job;
 }
 
 pub struct AsyncJob<G> where G: Computation {
