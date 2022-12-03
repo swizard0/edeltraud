@@ -11,14 +11,13 @@ use std::{
     },
 };
 
-use super::{
+use crate::{
     Job,
+    JobUnit,
     Builder,
     AsyncJob,
     Edeltraud,
-    ThreadPool,
     Computation,
-    ThreadPoolMap,
     job,
     job_async,
 };
@@ -65,13 +64,13 @@ enum SleepJobRec {
 
 struct WorkComplete;
 
-impl Job for SleepJobRec {
-    fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self> {
-        match self {
+impl<'a, J> Job for JobUnit<'a, J, SleepJobRec> where J: From<SleepJobRec> {
+    fn run(self) {
+        match self.job {
             SleepJobRec::Master { sync_tx, } => {
                 let (tx, rx) = mpsc::channel();
                 for _ in 0 .. 4 {
-                    thread_pool.spawn(SleepJobRec::Slave { tx: tx.clone(), })
+                    self.handle.spawn(SleepJobRec::Slave { tx: tx.clone(), })
                         .unwrap();
                 }
                 for _ in 0 .. 4 {
@@ -113,10 +112,11 @@ impl From<AsyncJob<SleepJob>> for WrappedSleepJob {
     }
 }
 
-impl Job for WrappedSleepJob {
-    fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self> {
-        let WrappedSleepJob(sleep_job) = self;
-        sleep_job.run(&ThreadPoolMap::new(thread_pool))
+impl<'a, J> Job for JobUnit<'a, J, WrappedSleepJob> {
+    fn run(self) {
+        let WrappedSleepJob(sleep_job) = self.job;
+        let job_unit = JobUnit { handle: self.handle, job: sleep_job, };
+        job_unit.run()
     }
 }
 
@@ -187,19 +187,19 @@ fn small_stress_job() {
         allow_rec: bool,
     }
 
-    impl Job for StressJob {
-        fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self> {
-            if self.allow_rec {
+    impl<'a, J> Job for JobUnit<'a, J, StressJob> where J: From<StressJob> {
+        fn run(self) {
+            if self.job.allow_rec {
                 for _ in 0 .. SUBJOBS_COUNT {
-                    thread_pool
+                    self.handle
                         .spawn(StressJob {
-                            shared_counter: self.shared_counter.clone(),
+                            shared_counter: self.job.shared_counter.clone(),
                             allow_rec: false,
                         })
                         .unwrap();
                 }
             } else {
-                self.shared_counter.fetch_add(1, atomic::Ordering::Relaxed);
+                self.job.shared_counter.fetch_add(1, atomic::Ordering::Relaxed);
             }
         }
     }

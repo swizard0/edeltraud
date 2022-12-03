@@ -15,9 +15,6 @@ use std::{
         Mutex,
         Condvar,
     },
-    marker::{
-        PhantomData,
-    },
     time::{
         Instant,
         Duration,
@@ -36,25 +33,46 @@ mod inner;
 #[cfg(test)]
 mod tests;
 
-pub trait Job: Sized + Send + 'static {
-    fn run<P>(self, thread_pool: &P) where P: ThreadPool<Self>;
+pub trait Job: Sized {
+    fn run(self);
 }
 
-pub trait Computation: Sized + Send + 'static {
+pub struct JobUnit<'a, J, G> {
+    pub handle: &'a Handle<J>,
+    pub job: G,
+}
+
+pub trait Computation: Sized {
     type Output;
 
     fn run(self) -> Self::Output;
 }
 
-pub trait ThreadPool<J> {
-    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job;
-}
-
-pub struct Edeltraud<J> where J: Job {
+pub struct Edeltraud<J> {
     inner: Arc<inner::Inner<J>>,
     threads: Arc<Vec<thread::Thread>>,
     workers: Vec<thread::JoinHandle<()>>,
     shutdown: Arc<Shutdown>,
+}
+
+pub struct Handle<J> {
+    inner: Arc<inner::Inner<J>>,
+    threads: Arc<Vec<thread::Thread>>,
+}
+
+impl<J> Clone for Handle<J> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            threads: self.threads.clone(),
+        }
+    }
+}
+
+impl<J> Handle<J> {
+    fn spawn<G>(&self, job: G) -> Result<(), SpawnError> where J: From<G> {
+        self.inner.spawn(job.into(), &self.threads)
+    }
 }
 
 struct Shutdown {
@@ -106,7 +124,7 @@ impl Builder {
         self
     }
 
-    pub fn build<J>(&mut self) -> Result<Edeltraud<J>, BuildError> where J: Job {
+    pub fn build<J>(&mut self) -> Result<Edeltraud<J>, BuildError> where for<'a> JobUnit<'a, J, J>: Job, J: Send + 'static {
         let worker_threads = self.worker_threads
             .unwrap_or_else(num_cpus::get);
         if worker_threads == 0 {
@@ -145,13 +163,19 @@ impl Builder {
                     };
 
                     let mut worker_thread_pool = EdeltraudLocal {
-                        inner_ref: &inner,
-                        threads_ref: &threads,
+                        handle: Handle {
+                            inner: inner.clone(),
+                            threads,
+                        },
                         stats: Stats { counters, ..Default::default() },
                     };
                     while let Some(job) = inner.acquire_job(worker_index, &mut worker_thread_pool.stats) {
                         let now = Instant::now();
-                        job.run(&worker_thread_pool);
+                        let job_unit = JobUnit {
+                            handle: &worker_thread_pool.handle,
+                            job,
+                        };
+                        job_unit.run();
                         worker_thread_pool.stats.job_run_time += now.elapsed();
                         worker_thread_pool.stats.job_run_count += 1;
                     }
@@ -191,9 +215,9 @@ impl Builder {
     }
 }
 
-impl<J> Edeltraud<J> where J: Job {
-    pub fn handle(&self) -> EdeltraudHandle<J> {
-        EdeltraudHandle {
+impl<J> Edeltraud<J> {
+    pub fn handle(&self) -> Handle<J> {
+        Handle {
             inner: self.inner.clone(),
             threads: self.threads.clone(),
         }
@@ -226,7 +250,7 @@ impl<J> Edeltraud<J> where J: Job {
     }
 }
 
-impl<J> Drop for Edeltraud<J> where J: Job {
+impl<J> Drop for Edeltraud<J> {
     fn drop(&mut self) {
         log::debug!("Edeltraud::drop() invoked");
         self.inner.force_terminate(&self.threads);
@@ -259,106 +283,38 @@ pub struct AsyncJob<G> where G: Computation {
     result_tx: oneshot::Sender<G::Output>,
 }
 
-pub fn job<P, J, G>(thread_pool: &P, job: G) -> Result<(), SpawnError>
-where P: ThreadPool<J>,
-      J: Job + From<G>,
-{
-    thread_pool.spawn(job.into())
+pub fn job<J, G>(thread_pool: &Handle<J>, job: G) -> Result<(), SpawnError> where J: From<G> {
+    thread_pool.spawn(job)
 }
 
-pub fn job_async<P, J, G>(thread_pool: &P, computation: G) -> Result<AsyncResult<G::Output>, SpawnError>
-where P: ThreadPool<J>,
-      J: Job + From<AsyncJob<G>>,
+pub fn job_async<J, G>(thread_pool: &Handle<J>, computation: G) -> Result<AsyncResult<G::Output>, SpawnError>
+where J: From<AsyncJob<G>>,
       G: Computation,
 {
     let (result_tx, result_rx) = oneshot::channel();
     let async_job = AsyncJob { computation, result_tx, };
-    thread_pool.spawn(async_job.into())?;
+    thread_pool.spawn(async_job)?;
 
     Ok(AsyncResult { result_rx, })
 }
 
-impl<G> Job for AsyncJob<G> where G: Computation, G::Output: Send {
-    fn run<P>(self, _thread_pool: &P) where P: ThreadPool<Self> {
-        let output = self.computation.run();
-        if let Err(_send_error) = self.result_tx.send(output) {
+impl<'a, J, G> Job for JobUnit<'a, J, AsyncJob<G>> where G: Computation, /* G::Output: Send, */ {
+    fn run(self) {
+        let output = self.job.computation.run();
+        if let Err(_send_error) = self.job.result_tx.send(output) {
             log::warn!("async result channel dropped before job is finished");
         }
     }
 }
 
-pub struct ThreadPoolMap<P, J, G> {
-    thread_pool: P,
-    _marker: PhantomData<(J, G)>,
-}
-
-impl<P, J, G> ThreadPoolMap<P, J, G> {
-    pub fn new(thread_pool: P) -> Self {
-        Self { thread_pool, _marker: PhantomData, }
-    }
-}
-
-impl<P, J, G> Clone for ThreadPoolMap<P, J, G> where P: Clone {
-    fn clone(&self) -> Self {
-        Self {
-            thread_pool: self.thread_pool.clone(),
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<P, J, G> ThreadPool<G> for ThreadPoolMap<P, J, G>
-where P: ThreadPool<J>,
-      J: Job + From<G>,
-      G: Job,
-{
-    fn spawn(&self, job: G) -> Result<(), SpawnError> {
-        self.thread_pool.spawn(job.into())
-    }
-}
-
-pub struct EdeltraudHandle<J> {
-    inner: Arc<inner::Inner<J>>,
-    threads: Arc<Vec<thread::Thread>>,
-}
-
-impl<J> Clone for EdeltraudHandle<J> where J: Job {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            threads: self.threads.clone(),
-        }
-    }
-}
-
-impl<J> ThreadPool<J> for EdeltraudHandle<J> where J: Job {
-    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        self.inner.spawn(job, &self.threads)
-    }
-}
-
-struct EdeltraudLocal<'a, J> {
-    inner_ref: &'a inner::Inner<J>,
-    threads_ref: &'a [thread::Thread],
+struct EdeltraudLocal<J> {
+    handle: Handle<J>,
     stats: Stats,
 }
 
-impl<'a, J> Drop for EdeltraudLocal<'a, J> {
+impl<J> Drop for EdeltraudLocal<J> {
     fn drop(&mut self) {
-        self.inner_ref.force_terminate(self.threads_ref);
         log::info!("EdeltraudLocal::drop on {:?}, stats: {:?}", thread::current(), self.stats);
-    }
-}
-
-impl<'a, J> ThreadPool<J> for EdeltraudLocal<'a, J> where J: Job {
-    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        self.inner_ref.spawn(job, self.threads_ref)
-    }
-}
-
-impl<'a, P, J> ThreadPool<J> for &'a P where P: ThreadPool<J>, J: Job {
-    fn spawn(&self, job: J) -> Result<(), SpawnError> where J: Job {
-        (*self).spawn(job)
     }
 }
 
