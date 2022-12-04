@@ -37,8 +37,8 @@ pub trait Job: Sized {
     fn run(self);
 }
 
-pub struct JobUnit<'a, J, G> {
-    pub handle: &'a Handle<J>,
+pub struct JobUnit<J, G> {
+    pub handle: Handle<J>,
     pub job: G,
 }
 
@@ -124,7 +124,10 @@ impl Builder {
         self
     }
 
-    pub fn build<J>(&mut self) -> Result<Edeltraud<J>, BuildError> where for<'a> JobUnit<'a, J, J>: Job, J: Send + 'static {
+    pub fn build<J, U>(&mut self) -> Result<Edeltraud<J>, BuildError>
+    where U: Job + From<JobUnit<J, J>>,
+          J: Send + 'static,
+    {
         let worker_threads = self.worker_threads
             .unwrap_or_else(num_cpus::get);
         if worker_threads == 0 {
@@ -172,10 +175,11 @@ impl Builder {
                     while let Some(job) = inner.acquire_job(worker_index, &mut worker_thread_pool.stats) {
                         let now = Instant::now();
                         let job_unit = JobUnit {
-                            handle: &worker_thread_pool.handle,
+                            handle: worker_thread_pool.handle.clone(),
                             job,
                         };
-                        job_unit.run();
+                        let unit = U::from(job_unit);
+                        unit.run();
                         worker_thread_pool.stats.job_run_time += now.elapsed();
                         worker_thread_pool.stats.job_run_count += 1;
                     }
@@ -298,7 +302,7 @@ where J: From<AsyncJob<G>>,
     Ok(AsyncResult { result_rx, })
 }
 
-impl<'a, J, G> Job for JobUnit<'a, J, AsyncJob<G>> where G: Computation, /* G::Output: Send, */ {
+impl<J, G> Job for JobUnit<J, AsyncJob<G>> where G: Computation {
     fn run(self) {
         let output = self.job.computation.run();
         if let Err(_send_error) = self.job.result_tx.send(output) {
@@ -314,6 +318,7 @@ struct EdeltraudLocal<J> {
 
 impl<J> Drop for EdeltraudLocal<J> {
     fn drop(&mut self) {
+        self.handle.inner.force_terminate(&self.handle.threads);
         log::info!("EdeltraudLocal::drop on {:?}, stats: {:?}", thread::current(), self.stats);
     }
 }

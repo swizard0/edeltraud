@@ -16,11 +16,12 @@ use crate::{
     JobUnit,
     Builder,
     AsyncJob,
-    Edeltraud,
     Computation,
     job,
     job_async,
 };
+
+// basic
 
 struct SleepJob;
 
@@ -34,9 +35,9 @@ impl Computation for SleepJob {
 
 #[test]
 fn basic() {
-    let edeltraud: Edeltraud<AsyncJob<SleepJob>> = Builder::new()
+    let edeltraud = Builder::new()
         .worker_threads(4)
-        .build()
+        .build::<_, JobUnit<_, _>>()
         .unwrap();
     let pool = edeltraud.handle();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -57,20 +58,34 @@ fn basic() {
     assert!(elapsed < 0.5, "elapsed expected to be < 0.5, but it is {elapsed:?}");
 }
 
+// recursive_spawn
+
 enum SleepJobRec {
-    Master { sync_tx: mpsc::Sender<WorkComplete>, },
-    Slave { tx: mpsc::Sender<WorkComplete>, },
+    Master {
+        sync_tx: mpsc::Sender<WorkComplete>,
+    },
+    Slave {
+        tx: mpsc::Sender<WorkComplete>,
+    },
 }
 
 struct WorkComplete;
 
-impl<'a, J> Job for JobUnit<'a, J, SleepJobRec> where J: From<SleepJobRec> {
+struct SleepJobRecUnit<J>(JobUnit<J, SleepJobRec>);
+
+impl<J> From<JobUnit<J, SleepJobRec>> for SleepJobRecUnit<J> {
+    fn from(job_unit: JobUnit<J, SleepJobRec>) -> Self {
+        Self(job_unit)
+    }
+}
+
+impl<J> Job for SleepJobRecUnit<J> where J: From<SleepJobRec> {
     fn run(self) {
-        match self.job {
+        match self.0.job {
             SleepJobRec::Master { sync_tx, } => {
                 let (tx, rx) = mpsc::channel();
                 for _ in 0 .. 4 {
-                    self.handle.spawn(SleepJobRec::Slave { tx: tx.clone(), })
+                    self.0.handle.spawn(SleepJobRec::Slave { tx: tx.clone(), })
                         .unwrap();
                 }
                 for _ in 0 .. 4 {
@@ -88,9 +103,9 @@ impl<'a, J> Job for JobUnit<'a, J, SleepJobRec> where J: From<SleepJobRec> {
 
 #[test]
 fn recursive_spawn() {
-    let edeltraud: Edeltraud<SleepJobRec> = Builder::new()
+    let edeltraud = Builder::new()
         .worker_threads(5)
-        .build()
+        .build::<_, SleepJobRecUnit<_>>()
         .unwrap();
     let pool = edeltraud.handle();
     let now = Instant::now();
@@ -104,6 +119,8 @@ fn recursive_spawn() {
     assert!(elapsed < 0.5, "elapsed expected to be < 0.5, but it is {elapsed:?}");
 }
 
+// multilayer_job
+
 struct WrappedSleepJob(AsyncJob<SleepJob>);
 
 impl From<AsyncJob<SleepJob>> for WrappedSleepJob {
@@ -112,19 +129,30 @@ impl From<AsyncJob<SleepJob>> for WrappedSleepJob {
     }
 }
 
-impl<'a, J> Job for JobUnit<'a, J, WrappedSleepJob> {
+struct WrappedSleepJobUnit<J>(JobUnit<J, WrappedSleepJob>);
+
+impl<J> From<JobUnit<J, WrappedSleepJob>> for WrappedSleepJobUnit<J> {
+    fn from(job_unit: JobUnit<J, WrappedSleepJob>) -> Self {
+        Self(job_unit)
+    }
+}
+
+impl<J> Job for WrappedSleepJobUnit<J> {
     fn run(self) {
-        let WrappedSleepJob(sleep_job) = self.job;
-        let job_unit = JobUnit { handle: self.handle, job: sleep_job, };
+        let WrappedSleepJob(sleep_job) = self.0.job;
+        let job_unit = JobUnit {
+            handle: self.0.handle,
+            job: sleep_job,
+        };
         job_unit.run()
     }
 }
 
 #[test]
 fn multilayer_job() {
-    let edeltraud: Edeltraud<WrappedSleepJob> = Builder::new()
+    let edeltraud = Builder::new()
         .worker_threads(4)
-        .build()
+        .build::<_, WrappedSleepJobUnit<_>>()
         .unwrap();
     let pool = edeltraud.handle();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -145,6 +173,8 @@ fn multilayer_job() {
     assert!(elapsed < 0.55, "elapsed expected to be < 0.55, but it is {elapsed:?}");
 }
 
+// async_job
+
 struct SleepJobValue(isize);
 
 impl Computation for SleepJobValue {
@@ -158,9 +188,9 @@ impl Computation for SleepJobValue {
 
 #[test]
 fn async_job() {
-    let edeltraud: Edeltraud<AsyncJob<SleepJobValue>> = Builder::new()
+    let edeltraud = Builder::new()
         .worker_threads(4)
-        .build()
+        .build::<_, JobUnit<_, _>>()
         .unwrap();
     let pool = edeltraud.handle();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -175,6 +205,8 @@ fn async_job() {
     assert_eq!(value, 144);
 }
 
+// small_stress_job
+
 #[test]
 fn small_stress_job() {
     const JOBS_COUNT: usize = 256;
@@ -187,26 +219,34 @@ fn small_stress_job() {
         allow_rec: bool,
     }
 
-    impl<'a, J> Job for JobUnit<'a, J, StressJob> where J: From<StressJob> {
+    struct StressJobUnit<J>(JobUnit<J, StressJob>);
+
+    impl<J> From<JobUnit<J, StressJob>> for StressJobUnit<J> {
+        fn from(job_unit: JobUnit<J, StressJob>) -> Self {
+            Self(job_unit)
+        }
+    }
+
+    impl<J> Job for StressJobUnit<J> where J: From<StressJob> {
         fn run(self) {
-            if self.job.allow_rec {
+            if self.0.job.allow_rec {
                 for _ in 0 .. SUBJOBS_COUNT {
-                    self.handle
+                    self.0.handle
                         .spawn(StressJob {
-                            shared_counter: self.job.shared_counter.clone(),
+                            shared_counter: self.0.job.shared_counter.clone(),
                             allow_rec: false,
                         })
                         .unwrap();
                 }
             } else {
-                self.job.shared_counter.fetch_add(1, atomic::Ordering::Relaxed);
+                self.0.job.shared_counter.fetch_add(1, atomic::Ordering::Relaxed);
             }
         }
     }
 
-    let edeltraud: Edeltraud<StressJob> = Builder::new()
+    let edeltraud = Builder::new()
         .worker_threads(4)
-        .build()
+        .build::<_, StressJobUnit<_>>()
         .unwrap();
     let thread_pool = edeltraud.handle();
 
