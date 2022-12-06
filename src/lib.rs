@@ -70,7 +70,7 @@ impl<J> Clone for Handle<J> {
 }
 
 impl<J> Handle<J> {
-    fn spawn<G>(&self, job: G) -> Result<(), SpawnError> where J: From<G> {
+    pub fn spawn<G>(&self, job: G) -> Result<(), SpawnError> where J: From<G> {
         self.inner.spawn(job.into(), &self.threads)
     }
 }
