@@ -201,6 +201,7 @@ impl<J> Inner<J> {
                             });
                             if let Err(changed_tag) = bucket.touch_tag.try_set(prev_tag, new_tag) {
                                 prev_tag = changed_tag;
+                                backoff.reset();
                                 continue;
                             }
                         } else {
@@ -214,6 +215,7 @@ impl<J> Inner<J> {
                     stats.acquire_job_thread_park_time += now.elapsed();
                     stats.acquire_job_thread_park_count += 1;
                     prev_tag = bucket.touch_tag.load();
+                    backoff.reset();
                     continue;
                 }
 
