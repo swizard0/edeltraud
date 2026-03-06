@@ -1,16 +1,16 @@
 [package]
 name = "edeltraud"
-version = "0.16.4"
+version = "0.17.0"
 authors = ["Alexey Voznyuk <me@swizard.info>"]
 description = "Simple thread pool for mixed tokio / threaded infrastructure with zero allocations and static dispatching only."
 license = "MIT"
 repository = "https://github.com/swizard0/edeltraud"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 log = "^0.4"
 futures = "^0.3"
-num_cpus = "^1.13"
+num_cpus = "^1.17"
 crossbeam = "^0.8"
 
 [dev-dependencies]
